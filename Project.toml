@@ -48,9 +48,12 @@ UnPack = "3a884ed6-31ef-47d7-9d2a-63182c4928ed"
 [weakdeps]
 FMIImport = "9fcbc62e-52a0-44e9-a616-1359a0008194"
 
-[sources]
-ModelingToolkitBase = {path = "/home/crackauc/sandbox/tmp_ModelingToolkit/lib/ModelingToolkitBase", subdir = "lib/ModelingToolkitBase"}
-SciCompDSL = {subdir = "lib/SciCompDSL"}
+[sources.ModelingToolkitBase]
+path = "/home/crackauc/sandbox/tmp_ModelingToolkit/lib/ModelingToolkitBase"
+subdir = "lib/ModelingToolkitBase"
+
+[sources.SciCompDSL]
+subdir = "lib/SciCompDSL"
 
 [extensions]
 MTKFMIExt = "FMIImport"
@@ -65,7 +68,7 @@ Combinatorics = "1"
 CommonSolve = "0.2.4"
 DataInterpolations = "7, 8"
 DataStructures = "0.18, 0.19"
-DelayDiffEq = "5.61"
+DelayDiffEq = "5.61, 6"
 DiffEqBase = "6.189.1"
 DifferentiationInterface = "0.6.47, 0.7"
 DocStringExtensions = "0.8, 0.9"
