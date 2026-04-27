@@ -48,9 +48,12 @@ UnPack = "3a884ed6-31ef-47d7-9d2a-63182c4928ed"
 [weakdeps]
 FMIImport = "9fcbc62e-52a0-44e9-a616-1359a0008194"
 
-[sources]
-ModelingToolkitBase = {path = "/home/crackauc/sandbox/tmp_ModelingToolkit/lib/ModelingToolkitBase", subdir = "lib/ModelingToolkitBase"}
-SciCompDSL = {subdir = "lib/SciCompDSL"}
+[sources.ModelingToolkitBase]
+path = "/home/crackauc/sandbox/tmp_ModelingToolkit/lib/ModelingToolkitBase"
+subdir = "lib/ModelingToolkitBase"
+
+[sources.SciCompDSL]
+subdir = "lib/SciCompDSL"
 
 [extensions]
 MTKFMIExt = "FMIImport"
@@ -87,7 +90,7 @@ NonlinearSolve = "4.3"
 OffsetArrays = "1"
 OrderedCollections = "1"
 OrdinaryDiffEq = "6.82.0"
-OrdinaryDiffEqCore = "1.34.0, 2, 3"
+OrdinaryDiffEqCore = "1.34.0, 2, 3, 5"
 OrdinaryDiffEqDefault = "1.2"
 OrdinaryDiffEqNonlinearSolve = "1.5.0"
 PreallocationTools = "0.4.27, 1"
