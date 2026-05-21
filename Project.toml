@@ -48,9 +48,12 @@ UnPack = "3a884ed6-31ef-47d7-9d2a-63182c4928ed"
 [weakdeps]
 FMIImport = "9fcbc62e-52a0-44e9-a616-1359a0008194"
 
-[sources]
-ModelingToolkitBase = {path = "/home/crackauc/sandbox/tmp_ModelingToolkit/lib/ModelingToolkitBase", subdir = "lib/ModelingToolkitBase"}
-SciCompDSL = {subdir = "lib/SciCompDSL"}
+[sources.ModelingToolkitBase]
+path = "/home/crackauc/sandbox/tmp_ModelingToolkit/lib/ModelingToolkitBase"
+subdir = "lib/ModelingToolkitBase"
+
+[sources.SciCompDSL]
+subdir = "lib/SciCompDSL"
 
 [extensions]
 MTKFMIExt = "FMIImport"
@@ -71,7 +74,7 @@ DifferentiationInterface = "0.6.47, 0.7"
 DocStringExtensions = "0.8, 0.9"
 FMIImport = "1"
 FillArrays = "1.13.0"
-FindFirstFunctions = "1"
+FindFirstFunctions = "1, 2"
 ForwardDiff = "0.10.3, 1"
 Graphs = "1.5.2"
 InteractiveUtils = "1"
