@@ -48,9 +48,12 @@ UnPack = "3a884ed6-31ef-47d7-9d2a-63182c4928ed"
 [weakdeps]
 FMIImport = "9fcbc62e-52a0-44e9-a616-1359a0008194"
 
-[sources]
-ModelingToolkitBase = {path = "/home/crackauc/sandbox/tmp_ModelingToolkit/lib/ModelingToolkitBase", subdir = "lib/ModelingToolkitBase"}
-SciCompDSL = {subdir = "lib/SciCompDSL"}
+[sources.ModelingToolkitBase]
+path = "/home/crackauc/sandbox/tmp_ModelingToolkit/lib/ModelingToolkitBase"
+subdir = "lib/ModelingToolkitBase"
+
+[sources.SciCompDSL]
+subdir = "lib/SciCompDSL"
 
 [extensions]
 MTKFMIExt = "FMIImport"
@@ -77,7 +80,7 @@ Graphs = "1.5.2"
 InteractiveUtils = "1"
 Libdl = "1"
 LinearAlgebra = "1"
-LinearSolve = "3.56"
+LinearSolve = "3.56, 5"
 Logging = "1"
 ModelingToolkitBase = "1.8.1"
 ModelingToolkitStandardLibrary = "2.20"
