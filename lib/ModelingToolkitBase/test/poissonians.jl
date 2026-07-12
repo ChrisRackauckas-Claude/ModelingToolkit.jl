@@ -84,6 +84,51 @@ using OrdinaryDiffEq, StochasticDiffEq
         @test !ispoissonian(x)
     end
 
+    @testset "Return type consistency with @variables" begin
+        @parameters λ₁ λ₂ λ₃
+
+        # Single inline: should return a 1-element Vector
+        result_single = @poissonians dN_a(λ₁)
+        @test result_single isa Vector
+        @test length(result_single) == 1
+        @test ispoissonian(result_single[1])
+        @test isequal(result_single[1], dN_a)
+
+        # Multiple inline: should return a Vector
+        result_multi = @poissonians dN_b(λ₁) dN_c(λ₂)
+        @test result_multi isa Vector
+        @test length(result_multi) == 2
+        @test all(ispoissonian, result_multi)
+        @test isequal(result_multi[1], dN_b)
+        @test isequal(result_multi[2], dN_c)
+
+        # Single in block: should return a 1-element Vector
+        result_block_single = @poissonians begin
+            dN_d(λ₁)
+        end
+        @test result_block_single isa Vector
+        @test length(result_block_single) == 1
+        @test ispoissonian(result_block_single[1])
+        @test isequal(result_block_single[1], dN_d)
+
+        # Multiple in block: should return a Vector
+        result_block_multi = @poissonians begin
+            dN_e(λ₂)
+            dN_f(λ₃)
+        end
+        @test result_block_multi isa Vector
+        @test length(result_block_multi) == 2
+        @test all(ispoissonian, result_block_multi)
+        @test isequal(result_block_multi[1], dN_e)
+        @test isequal(result_block_multi[2], dN_f)
+
+        # Three inline: should return a Vector of length 3
+        result_three = @poissonians dN_g(λ₁) dN_h(λ₂) dN_i(λ₃)
+        @test result_three isa Vector
+        @test length(result_three) == 3
+        @test all(ispoissonian, result_three)
+    end
+
     @testset "Error on missing rate" begin
         # This should error - rate is required
         @test_throws Exception @macroexpand @poissonians dN
@@ -103,7 +148,7 @@ end
         eqs = [
             D(S) ~ -dN_inf,
             D(I) ~ dN_inf - dN_rec,
-            D(R) ~ dN_rec
+            D(R) ~ dN_rec,
         ]
 
         # Using explicit 5-argument constructor with poissonians kwarg
@@ -121,7 +166,7 @@ end
         eqs = [
             D(S) ~ -dN_inf,
             D(I) ~ dN_inf - dN_rec,
-            D(R) ~ dN_rec
+            D(R) ~ dN_rec,
         ]
 
         # Two-argument constructor should auto-detect poissonians
@@ -139,7 +184,7 @@ end
         eqs = [
             D(S) ~ -dN_inf,
             D(I) ~ dN_inf - dN_rec,
-            D(R) ~ dN_rec
+            D(R) ~ dN_rec,
         ]
 
         @named sys = System(eqs, t)
@@ -256,7 +301,7 @@ end
         eqs = [
             D(S) ~ -dN_inf,
             D(I) ~ dN_inf - dN_rec,
-            D(R) ~ dN_rec
+            D(R) ~ dN_rec,
         ]
 
         @named sys = System(eqs, t)
@@ -370,7 +415,7 @@ end
 
         eqs = [
             D(X) ~ dN,
-            D(Y) ~ -dN
+            D(Y) ~ -dN,
         ]
         @named sys = System(eqs, t)
         compiled_sys = mtkcompile(sys)
@@ -647,8 +692,10 @@ end
 
         # Pure jump system with ConstantRateJump → use SSAStepper
         # SSAStepper accepts seed kwarg for reproducibility (not save_everystep!)
-        jprob = JumpProblem(compiled_sys, [N => 0.0, λ => λ_val], (0.0, T);
-            aggregator = Direct(), save_positions = (false, false), rng)
+        jprob = JumpProblem(
+            compiled_sys, [N => 0.0, λ => λ_val], (0.0, T);
+            aggregator = Direct(), save_positions = (false, false), rng
+        )
 
         seed = 1111
         Nfinal = zeros(Nsims)
@@ -665,7 +712,7 @@ end
         sample_var = var(Nfinal)
 
         @test abs(sample_mean - E_N) < 0.05 * E_N  # 5% relative error
-        @test abs(sample_var - Var_N) < 0.10 * Var_N  # 10% for variance
+        @test abs(sample_var - Var_N) < 0.1 * Var_N  # 10% for variance
     end
 
     @testset "Birth-death process: compare to analytical steady state" begin
@@ -693,8 +740,10 @@ end
         Nsims = 1000
 
         # VariableRateJumps require ODE solver
-        jprob_sym = JumpProblem(compiled_sys, [X => X0, b => b_val, d => d_val], (0.0, T);
-            save_positions = (false, false), rng)
+        jprob_sym = JumpProblem(
+            compiled_sys, [X => X0, b => b_val, d => d_val], (0.0, T);
+            save_positions = (false, false), rng
+        )
 
         seed = 2222
         Xfinal_sym = zeros(Nsims)
@@ -709,7 +758,7 @@ end
         mean_sym = mean(Xfinal_sym)
 
         # Should match analytical steady state
-        @test abs(mean_sym - E_X_ss) < 0.10 * E_X_ss
+        @test abs(mean_sym - E_X_ss) < 0.1 * E_X_ss
     end
 
     @testset "SIR model: compare symbolic @poissonians to direct JumpProcesses" begin
@@ -722,7 +771,7 @@ end
         eqs = [
             D(S) ~ -dN_inf,
             D(I) ~ dN_inf - dN_rec,
-            D(R) ~ dN_rec
+            D(R) ~ dN_rec,
         ]
         @named sys = System(eqs, t)
         compiled_sys = mtkcompile(sys)
@@ -740,9 +789,11 @@ end
         save_times = 1.0:1.0:T
         Ntimes = length(save_times)
 
-        jprob_sym = JumpProblem(compiled_sys,
+        jprob_sym = JumpProblem(
+            compiled_sys,
             [S => S0, I => I0, R => R0, β => β_val, γ => γ_val], (0.0, T);
-            save_positions = (false, false), rng)
+            save_positions = (false, false), rng
+        )
 
         seed = 3333
         R_sym = zeros(Nsims, Ntimes)
@@ -769,8 +820,10 @@ end
             integ.u[3] += 1
         end
         j2 = VariableRateJump(r2, a2!)
-        jprob_direct = JumpProblem(oprob_direct, Direct(), j1, j2;
-            rng, save_positions = (false, false))
+        jprob_direct = JumpProblem(
+            oprob_direct, Direct(), j1, j2;
+            rng, save_positions = (false, false)
+        )
 
         seed = 3333
         R_direct = zeros(Nsims, Ntimes)
@@ -787,8 +840,10 @@ end
         mean_direct = vec(mean(R_direct; dims = 1))
 
         # All time points should match within tolerance
-        @test all(abs(mean_sym[k] - mean_direct[k]) < 0.10 * max(mean_direct[k], 1.0)
-                  for k in 1:Ntimes)
+        @test all(
+            abs(mean_sym[k] - mean_direct[k]) < 0.1 * max(mean_direct[k], 1.0)
+                for k in 1:Ntimes
+        )
     end
 
     @testset "Jump-diffusion: @brownians + @poissonians vs analytical" begin
@@ -810,9 +865,11 @@ end
         T = 2.0
         Nsims = 2000
 
-        jprob_sym = JumpProblem(compiled_sys,
+        jprob_sym = JumpProblem(
+            compiled_sys,
             [X => 0.0, σ => σ_val, λ => λ_val, δ => δ_val], (0.0, T);
-            save_positions = (false, false), rng)
+            save_positions = (false, false), rng
+        )
 
         seed = 4444
         Xfinal_sym = zeros(Nsims)
@@ -828,7 +885,7 @@ end
         sample_mean = mean(Xfinal_sym)
         sample_var = var(Xfinal_sym)
 
-        @test abs(sample_mean - E_X) < 0.10 * E_X
+        @test abs(sample_mean - E_X) < 0.1 * E_X
         @test abs(sample_var - Var_X) < 0.15 * Var_X
     end
 
@@ -856,8 +913,10 @@ end
         Nsims = 1000
 
         # Has ODE part, so needs ODE solver
-        jprob = JumpProblem(compiled_sys, [X => X0, a => a_val, λ => λ_val], (0.0, T);
-            save_positions = (false, false), rng)
+        jprob = JumpProblem(
+            compiled_sys, [X => X0, a => a_val, λ => λ_val], (0.0, T);
+            save_positions = (false, false), rng
+        )
 
         seed = 5555
         Xfinal = zeros(Nsims)
@@ -870,7 +929,7 @@ end
         E_X_ss = λ_val / a_val  # = 10
 
         sample_mean = mean(Xfinal)
-        @test abs(sample_mean - E_X_ss) < 0.10 * E_X_ss
+        @test abs(sample_mean - E_X_ss) < 0.1 * E_X_ss
     end
 
     @testset "State-dependent coefficient: geometric decay X ~ -δ*X*dN(λ)" begin
@@ -902,8 +961,10 @@ end
         Nsims = 2000
 
         # Pure jump system with CRJ → can use SSAStepper
-        jprob = JumpProblem(compiled_sys, [X => X0, λ => λ_val, δ => δ_val], (0.0, T);
-            aggregator = Direct(), save_positions = (false, false), rng)
+        jprob = JumpProblem(
+            compiled_sys, [X => X0, λ => λ_val, δ => δ_val], (0.0, T);
+            aggregator = Direct(), save_positions = (false, false), rng
+        )
 
         seed = 6666
         Xfinal = zeros(Nsims)
@@ -918,7 +979,7 @@ end
 
         sample_mean = mean(Xfinal)
 
-        @test abs(sample_mean - E_X_T) < 0.10 * E_X_T
+        @test abs(sample_mean - E_X_T) < 0.1 * E_X_T
     end
 
     @testset "State-dependent coefficient: compare to direct JumpProcesses" begin
@@ -938,8 +999,10 @@ end
         Nsims = 1000
 
         # Symbolic version
-        jprob_sym = JumpProblem(compiled_sys, [X => X0, λ => λ_val, δ => δ_val], (0.0, T);
-            aggregator = Direct(), save_positions = (false, false), rng)
+        jprob_sym = JumpProblem(
+            compiled_sys, [X => X0, λ => λ_val, δ => δ_val], (0.0, T);
+            aggregator = Direct(), save_positions = (false, false), rng
+        )
 
         seed = 7777
         Xfinal_sym = zeros(Nsims)

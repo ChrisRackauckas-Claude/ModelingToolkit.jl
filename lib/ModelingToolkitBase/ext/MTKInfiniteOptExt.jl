@@ -1,5 +1,6 @@
 module MTKInfiniteOptExt
 using ModelingToolkitBase
+using OrderedCollections: OrderedSet
 import Symbolics: SymbolicT
 using InfiniteOpt
 using DiffEqBase
@@ -7,9 +8,34 @@ using SciMLStructures
 using LinearAlgebra
 using StaticArrays
 using UnPack
+using Symbolics: unwrap
 import SymbolicUtils
 import NaNMath
 const MTK = ModelingToolkitBase
+
+function __init__()
+    # Workaround for Julia 1.10 compiler bug (Issue #4211)
+    # On Julia 1.10, loading this extension can cause collect_vars! to fail
+    # to properly call collect_var! until collect_var! has been called directly.
+    # This forces correct method compilation before user code runs.
+    if VERSION < v"1.11"
+        _force_collect_var_compilation()
+    end
+    return nothing
+end
+
+# Helper function to force collect_var! compilation on Julia 1.10.
+# This works around a method invalidation bug where the mutual recursion between
+# collect_vars! and collect_var! breaks after this extension loads.
+function _force_collect_var_compilation()
+    MTK.@variables _dummy_t
+    MTK.@parameters _dummy_p
+    MTK.@variables _dummy_x(_dummy_t) = _dummy_p
+    _us = OrderedSet{SymbolicT}()
+    _ps = OrderedSet{SymbolicT}()
+    MTK.collect_var!(_us, _ps, unwrap(_dummy_x), unwrap(_dummy_t); depth = 0)
+    return nothing
+end
 
 struct InfiniteOptModel
     model::InfiniteModel
@@ -30,11 +56,14 @@ struct JuMPDynamicOptProblem{uType, tType, isinplace, P, F, K} <:
     wrapped_model::InfiniteOptModel
     kwargs::K
 
-    function JuMPDynamicOptProblem(f, u0, tspan, p, model, kwargs...)
+    function JuMPDynamicOptProblem(f, u0, tspan, p, model, kwargs)
         return new{
             typeof(u0), typeof(tspan), SciMLBase.isinplace(f, 5),
             typeof(p), typeof(f), typeof(kwargs),
         }(f, u0, tspan, p, model, kwargs)
+    end
+    function JuMPDynamicOptProblem(f, u0, tspan, p, model; kwargs...)
+        return JuMPDynamicOptProblem(f, u0, tspan, p, model, kwargs)
     end
 end
 
@@ -47,11 +76,14 @@ struct InfiniteOptDynamicOptProblem{uType, tType, isinplace, P, F, K} <:
     wrapped_model::InfiniteOptModel
     kwargs::K
 
-    function InfiniteOptDynamicOptProblem(f, u0, tspan, p, model, kwargs...)
+    function InfiniteOptDynamicOptProblem(f, u0, tspan, p, model, kwargs)
         return new{
             typeof(u0), typeof(tspan), SciMLBase.isinplace(f),
             typeof(p), typeof(f), typeof(kwargs),
         }(f, u0, tspan, p, model, kwargs)
+    end
+    function InfiniteOptDynamicOptProblem(f, u0, tspan, p, model; kwargs...)
+        return InfiniteOptDynamicOptProblem(f, u0, tspan, p, model, kwargs)
     end
 end
 
@@ -89,17 +121,38 @@ function MTK.add_constraint!(m::InfiniteOptModel, expr::Union{Equation, Inequali
 end
 MTK.set_objective!(m::InfiniteOptModel, expr) = @objective(m.model, Min, SymbolicUtils.unwrap_const(expr))
 
+function MTK.set_variable_bounds!(m::InfiniteOptModel, sys, pmap, tf, tunable_params, user_bounds = Dict())
+    (; state_bounds, input_bounds, param_bounds, tf_bounds) = MTK.extract_variable_bounds(sys, pmap, tf, tunable_params, user_bounds)
+    for (i, (lo, hi)) in state_bounds
+        set_lower_bound(m.U[i], lo)
+        set_upper_bound(m.U[i], hi)
+    end
+    for (i, (lo, hi)) in input_bounds
+        set_lower_bound(m.V[i], lo)
+        set_upper_bound(m.V[i], hi)
+    end
+    for (i, (lo, hi)) in param_bounds
+        set_lower_bound(m.P[i], lo)
+        set_upper_bound(m.P[i], hi)
+    end
+    return if !isnothing(tf_bounds)
+        set_lower_bound(m.tₛ, tf_bounds[1])
+        set_upper_bound(m.tₛ, tf_bounds[2])
+    end
+end
+
 function MTK.JuMPDynamicOptProblem(
         sys::System, op, tspan;
         dt = nothing,
         steps = nothing,
         tune_parameters = false,
-        guesses = Dict(), kwargs...
+        guesses = Dict(),
+        bounds = Dict(), kwargs...
     )
     prob,
         _ = MTK.process_DynamicOptProblem(
         JuMPDynamicOptProblem, InfiniteOptModel, sys,
-        op, tspan; dt, steps, tune_parameters, guesses, kwargs...
+        op, tspan; dt, steps, tune_parameters, guesses, bounds, kwargs...
     )
     return prob
 end
@@ -109,12 +162,13 @@ function MTK.InfiniteOptDynamicOptProblem(
         dt = nothing,
         steps = nothing,
         tune_parameters = false,
-        guesses = Dict(), kwargs...
+        guesses = Dict(),
+        bounds = Dict(), kwargs...
     )
     prob,
         pmap = MTK.process_DynamicOptProblem(
         InfiniteOptDynamicOptProblem, InfiniteOptModel,
-        sys, op, tspan; dt, steps, tune_parameters, guesses, kwargs...
+        sys, op, tspan; dt, steps, tune_parameters, guesses, bounds, kwargs...
     )
     MTK.add_equational_constraints!(prob.wrapped_model, sys, pmap, tspan)
     return prob

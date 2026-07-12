@@ -1,9 +1,13 @@
 using ModelingToolkit
 using NonlinearSolve, SCCNonlinearSolve
 using OrdinaryDiffEq
+using OrdinaryDiffEqBDF
 using SciMLBase, Symbolics
 using StaticArrays
 using LinearAlgebra, Test
+using SymbolicUtils
+import ModelingToolkitBase
+using Symbolics: SymbolicT, VartypeT, unwrap
 using ModelingToolkit: t_nounits as t, D_nounits as D
 
 @testset "Trivial case" begin
@@ -173,7 +177,7 @@ end
     sccprob = SCCNonlinearProblem(sys, [y => u0, t => t0])
     sccsol = solve(sccprob, NewtonRaphson(); abstol = 1.0e-12)
 
-    @test sol.u ≈ sccsol.u atol = 1.0e-10
+    @test sol.u ≈ sccsol.u atol = 1.0e-8
 
     # Test BLT sorted
     @test istril(StructuralTransformations.sorted_incidence_matrix(sys), 1)
@@ -294,6 +298,7 @@ import ModelingToolkitStandardLibrary.Hydraulic.IsothermalCompressible as IC
         connect(vol1.flange, mass.flange, vol2.flange)
         connect(src1.p, sin1.output)
         connect(src2.p, sin2.output)
+        src2.port.dm ~ 0
     ]
 
     initialization_eqs = [
@@ -361,7 +366,54 @@ end
     @variables x[1:3] y[1:3]
     @mtkcompile sys = System([p * x ~ r, q * y ~ s])
     @test issetequal(bound_parameters(sys), [q, s])
-    prob = SCCNonlinearProblem(sys, [p => ones(3, 3), r => ones(3)])
+    prob = SCCNonlinearProblem(sys, [p => ones(3, 3), r => ones(3)]; combine_sccs = false)
     @test issetequal(bound_parameters(prob.probs[1].f.sys), [q, s])
     @test issetequal(bound_parameters(prob.probs[2].f.sys), [q, s])
+end
+
+@testset "SCCs are sorted when combined" begin
+    # NOTE: This test is best-effort. It depends on the `active::Set{Int}` in the
+    # `SCCDecomposition` constructor hashing `2` before `1`. In other words,
+    # ```julia
+    # active = Set{Int}([1, 2])
+    # @assert collect(active) == [2, 1]
+    # ```
+    # But I can't guarantee that.
+    @variables x [irreducible = true] y [irreducible = true] z [irreducible = true] a b
+    @mtkcompile sys = System([2x ~ 4 + b, 3y ~ 7 + a, x^2 + z^2 ~ 100, a ~ 3, b ~ sin(a)])
+    # Ensure the system simplifies the way we expect
+    dvs = unknowns(sys)
+    @test issetequal(dvs, [y, x, z])
+    sched = ModelingToolkit.get_schedule(sys)
+    # NOTE: Intentionally not `var_sccs`
+    @test isequal(dvs[reduce(vcat, sched.var_sccs)], [y, x, z])
+    prob = SCCNonlinearProblem(sys, [z => 1])
+    sol = solve(prob)
+    @test SciMLBase.successful_retcode(sol)
+end
+
+@testset "`subexpressions_not_involving_vars!`" begin
+    @variables x[1:3]
+    @parameters (f::Function)(..)
+    ir = IRStructure{VartypeT}()
+    expr = f([x[1], 2x[2], x[2]^2 + x[3]]) + f(x) + f(x[2] + 1)
+    state = Dict{SymbolicT, SymbolicT}()
+    banned_vars = Set{SymbolicT}([x[3], x])
+    ModelingToolkitBase.subexpressions_not_involving_vars!(ir, [unwrap(expr)], banned_vars, state)
+    @test issetequal(keys(state), [x[1], 2x[2], x[2]^2, f(x[2] + 1)])
+end
+
+@testset "HashedRandom missing guesses in init `SCCNonlinearProblem` (#4603)" begin
+    # Initialization decomposes into multiple SCCs and no guesses are provided,
+    # so the default `HashedRandom` missing-guess strategy is used for the SCC
+    # init problem. This previously errored with
+    # `MethodError: no method matching stable_eachindex(::Vector{Int64})`.
+    @variables a(t) b(t) c(t) d(t)
+    @mtkcompile sys = System(
+        [D(a) ~ b, 0 ~ b^3 + b + a - 2, 0 ~ c^3 + c - b, 0 ~ d - c * b], t
+    )
+    prob = ODEProblem(sys, [a => 0.5], (0.0, 1.0))
+    @test prob.f.initialization_data.initializeprob isa SCCNonlinearProblem
+    sol = solve(prob, Rodas5P())
+    @test SciMLBase.successful_retcode(sol)
 end

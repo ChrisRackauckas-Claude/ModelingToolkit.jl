@@ -2,6 +2,7 @@
 $(DocStringExtensions.README)
 """
 module ModelingToolkit
+
 using PrecompileTools, Reexport
 @recompile_invalidations begin
     using StaticArrays
@@ -9,8 +10,8 @@ using PrecompileTools, Reexport
     # ONLY here for the invalidations
     import REPL
     using OffsetArrays: Origin
-    import BlockArrays: BlockArray, BlockedArray, Block, blocksize, blocksizes, blockpush!,
-        undef_blocks, blocks
+    import BlockArrays: BlockArray, BlockVector, BlockedArray, Block, blocksize, blocksizes, blockpush!,
+        undef_blocks, blocks, mortar
 end
 
 import SymbolicUtils
@@ -33,14 +34,8 @@ using SymbolicIndexingInterface
 using LinearAlgebra, SparseArrays
 using InteractiveUtils
 using DataStructures
-@static if pkgversion(DataStructures) >= v"0.19"
-    import DataStructures: IntDisjointSet
-else
-    import DataStructures: IntDisjointSets
-    const IntDisjointSet = IntDisjointSets
-end
 using Base.Threads
-using Setfield
+using Setfield, ConstructionBase
 import Libdl
 using DocStringExtensions
 using Base: RefValue
@@ -74,10 +69,7 @@ import Symbolics: rename, get_variables!, _solve, hessian_sparsity,
     jacobian, hessian, derivative, sparsejacobian, sparsehessian,
     scalarize, hasderiv
 import ModelingToolkitBase as MTKBase
-
-import SymbolicCompilerPasses as SCP
-import SymbolicCompilerPasses: MATMUL_ADD_RULE, LDIV_RULE, HVNCAT_STATIC_RULE,
-    TRIU_RULE, TRIL_RULE, NORMALIZE_RULE
+import SimpleNonlinearSolve
 
 import DiffEqBase: @add_kwonly
 @reexport using Symbolics
@@ -92,6 +84,7 @@ import PreallocationTools
 import PreallocationTools: DiffCache
 import FillArrays
 using BipartiteGraphs
+import SciMLStructures
 
 @recompile_invalidations begin
     import StateSelection
@@ -104,7 +97,7 @@ end
 
 macro import_mtkbase()
     allnames = names(MTKBase; all = true)
-    banned_names = Set{Symbol}([:eval, :include, :Variable])
+    banned_names = Set{Symbol}([:eval, :include, :Variable, :__init__])
     using_expr = Expr(:using, Expr(:(:), Expr(:., :ModelingToolkitBase)))
     inner_using_expr = using_expr.args[1]
 
@@ -160,6 +153,7 @@ end
 @reexport using .StructuralTransformations
 
 export SemilinearODEFunction, SemilinearODEProblem
+export analyze_initialization_jacobian
 export alias_elimination
 export linearize, linearization_function,
     LinearizationProblem, linearization_ap_transform
@@ -171,11 +165,23 @@ export TearingState
 export Clock, SolverStepClock, TimeDomain
 export get_sensitivity_function, get_comp_sensitivity_function,
     get_looptransfer_function, get_sensitivity, get_comp_sensitivity, get_looptransfer
+export isolate_subsystem
 
 function FMIComponent end
 
 @public linearize_symbolic, reorder_unknowns
 @public similarity_transform
 
-include(pkgdir(ModelingToolkitBase, "src", "precompile.jl"))
+include("precompile.jl")
+
+function __init__()
+    SU.hashcons(StructuralTransformations.NOTHING_EQ.lhs, true)
+    SU.hashcons(StructuralTransformations.NOTHING_EQ.rhs, true)
+    SU.hashcons(unwrap(ODE_GAMMA[1]), true)
+    SU.hashcons(unwrap(ODE_GAMMA[2]), true)
+    SU.hashcons(unwrap(ODE_GAMMA[3]), true)
+    SU.hashcons(unwrap(ODE_C), true)
+    return SU.hashcons(SCC_EXPLICITFUN_CACHE_OUT, true)
+end
+
 end # module

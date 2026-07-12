@@ -6,6 +6,14 @@
     ) where {iip, spec}
     check_complete(sys, JumpProblem)
     check_compatibility && check_compatible_system(JumpProblem, sys)
+    if haskey(kwargs, :tstops)
+        throw(
+            ArgumentError(
+                "Passing `tstops` directly to `JumpProblem(::System, ...)` is not supported. " *
+                    "Define tstops on the `System` via the `tstops` keyword instead."
+            )
+        )
+    end
 
     has_vrjs = any(x -> x isa VariableRateJump, jumps(sys))
     has_eqs = !isempty(equations(sys))
@@ -16,13 +24,13 @@
             prob = SDEProblem{iip, spec}(
                 sys, op, tspan; check_compatibility = false,
                 build_initializeprob = false, checkbounds, cse, check_length = false,
-                _skip_events = true, kwargs...
+                _skip_events = true, _skip_tstops = true, kwargs...
             )
         elseif has_eqs
             prob = ODEProblem{iip, spec}(
                 sys, op, tspan; check_compatibility = false,
                 build_initializeprob = false, checkbounds, cse, check_length = false,
-                _skip_events = true, kwargs...
+                _skip_events = true, _skip_tstops = true, kwargs...
             )
         else
             _, u0,
@@ -57,6 +65,11 @@
         )
         prob = DiscreteProblem(df, u0, tspan, p; kwargs...)
     end
+
+    # Create SymbolicTstops for all paths and forward via JumpProblem kwargs.
+    # Inner problems (SDEProblem/ODEProblem) are created with _skip_tstops = true
+    # to avoid duplication.
+    tstops = SymbolicTstops(sys; eval_expression, eval_module)
 
     dvs = unknowns(sys)
     unknowntoid = Dict(value(unknown) => i for (i, unknown) in enumerate(dvs))
@@ -102,12 +115,17 @@
     # to process_events (which may create ImplicitDiscreteProblems for affect subsystems)
     op_processed = operating_point_preprocess(sys, op)
     cbs = process_events(
-        sys; callback, eval_expression, eval_module, op = op_processed, reset_jumps = true
+        sys; callback, eval_expression, eval_module, op = op_processed, reset_jumps = true,
+        tspan
     )
 
     if rng !== nothing
         kwargs = (; kwargs..., rng)
     end
+    if tstops !== nothing
+        kwargs = (; kwargs..., tstops)
+    end
+    # MTK requires pre-scaled rate expressions; never ask JumpProcesses to rescale.
     return JumpProblem(
         prob, aggregator, jset; dep_graph = jtoj, vartojumps_map = vtoj,
         jumptovars_map = jtov, scale_rates = false, nocopy = true,
@@ -177,7 +195,7 @@ end
 # update a maj with parameter vectors
 function (ratemap::JumpSysMajParamMapper{U, V, W})(
         maj::MassActionJump, newparams;
-        scale_rates,
+        scale_rates = false,
         kwargs...
     ) where {
         U <: AbstractArray,
@@ -195,7 +213,8 @@ function (ratemap::JumpSysMajParamMapper{U, V, W})(
             )
         )
     end
-    scale_rates && JumpProcesses.scalerates!(maj.scaled_rates, maj.reactant_stoch)
+    # No scalerates! call — MTK requires pre-scaled rate expressions.
+    # The scale_rates kwarg is accepted but ignored for JumpProcesses API compatibility.
     return nothing
 end
 

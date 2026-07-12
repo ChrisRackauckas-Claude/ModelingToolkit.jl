@@ -73,6 +73,8 @@ ModelingToolkit.has_description
 ModelingToolkit.get_description
 ModelingToolkit.description
 bindings
+ModelingToolkit.has_initial_conditions
+ModelingToolkit.get_initial_conditions
 initial_conditions
 ModelingToolkit.has_guesses
 ModelingToolkit.get_guesses
@@ -124,7 +126,7 @@ namespaced version of `var`. Note that this can also be used to access subsystem
 or analysis points.
 
 !!! note
-    
+
     By default, top-level systems not marked as `complete` will apply their namespace. Systems
     marked as `complete` will not do this namespacing. This namespacing behavior can be toggled
     independently of whether the system is completed using [`toggle_namespacing`](@ref) and the

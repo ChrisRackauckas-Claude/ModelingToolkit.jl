@@ -198,7 +198,12 @@ end
 Convert an array of possibly scalarized variables into an `AtomicArraySet`.
 """
 as_atomic_array_set(vars::Vector{SymbolicT}) = as_atomic_array_set(Dict{SymbolicT, Nothing}, vars)
-function as_atomic_array_set(::Type{D}, vars::Vector{SymbolicT}) where {D}
+as_atomic_array_set(vars::Vector) = as_atomic_array_set(Vector{SymbolicT}(map(unwrap, vars)))
+as_atomic_array_set(vars::AtomicArraySet) = vars
+function as_atomic_array_set(
+        ::Type{D},
+        vars::Union{AbstractVector{SymbolicT}, AbstractSet{SymbolicT}}
+    ) where {D}
     set = AtomicArraySet{D}()
     for v in vars
         push_as_atomic_array!(set, v)
@@ -238,10 +243,16 @@ const AADSubWrapper{D} = AtomicArrayDictSubstitutionWrapper{D}
 
 Base.get(def::Base.Callable, dd::AADSubWrapper, k) = def()
 function Base.get(def::Base.Callable, dd::AADSubWrapper, k::SymbolicT)
-    arr, isarr = split_indexed_var(k)
     res = get_possibly_indexed(dd.dict, k, dd.default)
     if res === dd.default
+        arr, isarr = split_indexed_var(k)
         isarr && haskey(dd.dict, arr) && return k
+        return def()
+    end
+    if SU.is_array_shape(SU.shape(k)) && any(
+            Base.Fix2(===, dd.default) ∘ Base.Fix1(getindex, res),
+            SU.stable_eachindex(res)
+        )
         return def()
     end
     return res

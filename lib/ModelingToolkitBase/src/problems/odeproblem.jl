@@ -1,11 +1,15 @@
 """
-    generate_ODENLStepData(sys, u0, p, mm, nlstep_compile, nlstep_scc)
+    generate_ODENLStepData(sys, u0, p, mm, nlstep_compile, nlstep_scc; jac = false)
 
 Generate the NLStep data for implicit ODE solvers. This is a stub that throws an error
 if called without ModelingToolkit loaded. The actual implementation is provided by
 ModelingToolkit when it is loaded.
+
+When `jac = true`, the analytic Jacobian of the teared inner nonlinear system is
+generated symbolically and attached to `nlprob.f.jac`, so NonlinearSolve does not
+have to recompute it via AD/FD on every Newton iteration.
 """
-function generate_ODENLStepData(sys, u0, p, mm, nlstep_compile, nlstep_scc)
+function generate_ODENLStepData(sys, u0, p, mm, nlstep_compile, nlstep_scc; jac = false)
     error(
         """
         `nlstep=true` requires ModelingToolkit.jl to be loaded.
@@ -20,7 +24,7 @@ Base.@nospecializeinfer @fallback_iip_specialize function SciMLBase.ODEFunction{
         steady_state = false, checkbounds = false, sparsity = false, @nospecialize(analytic = nothing),
         simplify = false, cse = true, @nospecialize(initialization_data = nothing), expression = Val{false},
         check_compatibility = true, nlstep = false, nlstep_compile = true, nlstep_scc = false,
-        kwargs...
+        optimize = nothing, kwargs...
     ) where {iip, spec}
     check_complete(sys, ODEFunction)
     check_compatibility && check_compatible_system(ODEFunction, sys)
@@ -28,7 +32,7 @@ Base.@nospecializeinfer @fallback_iip_specialize function SciMLBase.ODEFunction{
     f = generate_rhs(
         sys; expression, wrap_gfw = Val{true},
         eval_expression, eval_module, checkbounds = checkbounds, cse,
-        kwargs...
+        optimize, kwargs...
     )
 
     if spec === SciMLBase.FunctionWrapperSpecialize && iip
@@ -45,7 +49,7 @@ Base.@nospecializeinfer @fallback_iip_specialize function SciMLBase.ODEFunction{
     if tgrad
         _tgrad = generate_tgrad(
             sys; expression, wrap_gfw = Val{true},
-            simplify, cse, eval_expression, eval_module, checkbounds, kwargs...
+            simplify, cse, eval_expression, eval_module, checkbounds, optimize, kwargs...
         )
     else
         _tgrad = nothing
@@ -54,7 +58,8 @@ Base.@nospecializeinfer @fallback_iip_specialize function SciMLBase.ODEFunction{
     if jac
         _jac = generate_jacobian(
             sys; expression, wrap_gfw = Val{true},
-            simplify, sparse, cse, eval_expression, eval_module, checkbounds, kwargs...
+            simplify, sparse, cse, eval_expression, eval_module, checkbounds, optimize,
+            kwargs...
         )
     else
         _jac = nothing
@@ -64,13 +69,13 @@ Base.@nospecializeinfer @fallback_iip_specialize function SciMLBase.ODEFunction{
     _M = concrete_massmatrix(M; sparse, u0)
 
     if nlstep
-        ode_nlstep = generate_ODENLStepData(sys, u0, p, M, nlstep_compile, nlstep_scc)
+        ode_nlstep = generate_ODENLStepData(sys, u0, p, M, nlstep_compile, nlstep_scc; jac)
     else
         ode_nlstep = nothing
     end
 
     observedfun = ObservedFunctionCache(
-        sys; expression, steady_state, eval_expression, eval_module, checkbounds, cse
+        sys; expression, steady_state, eval_expression, eval_module, checkbounds, cse, optimize
     )
 
     _W_sparsity = W_sparsity(sys)
@@ -90,7 +95,11 @@ Base.@nospecializeinfer @fallback_iip_specialize function SciMLBase.ODEFunction{
         nlstep_data = ode_nlstep,
     )
 
-    maybe_codegen_scimlfn(expression, ODEFunction{iip, spec}, args; kwargs...)
+    odefn = maybe_codegen_scimlfn(expression, ODEFunction{iip, spec}, args; kwargs...)
+    if expression != Val{true} && spec === SciMLBase.AutoSpecialize
+        odefn = SciMLBase.widen_bounded_type_params(odefn)
+    end
+    return odefn
 end
 
 Base.@nospecializeinfer @fallback_iip_specialize function SciMLBase.ODEProblem{iip, spec}(
@@ -102,20 +111,28 @@ Base.@nospecializeinfer @fallback_iip_specialize function SciMLBase.ODEProblem{i
     check_complete(sys, ODEProblem)
     check_compatibility && check_compatible_system(ODEProblem, sys)
 
-    f, u0,
-        p = process_SciMLProblem(
-        ODEFunction{iip, spec}, sys, op;
-        t = tspan !== nothing ? tspan[1] : tspan, check_length, eval_expression,
-        eval_module, expression, check_compatibility, kwargs...
-    )
+    _iip = resolve_iip(iip, op)
+    if _iip === true
+        f, u0, p = process_SciMLProblem(
+            ODEFunction{true, spec}, sys, op;
+            t = tspan !== nothing ? tspan[1] : tspan, check_length, eval_expression,
+            eval_module, expression, check_compatibility, kwargs...
+        )
+    else
+        f, u0, p = process_SciMLProblem(
+            ODEFunction{false, spec}, sys, op;
+            t = tspan !== nothing ? tspan[1] : tspan, check_length, eval_expression,
+            eval_module, expression, check_compatibility, kwargs...
+        )
+    end
 
     kwargs = process_kwargs(
-        sys; expression, callback, eval_expression, eval_module, op, _skip_events, kwargs...
+        sys; expression, callback, eval_expression, eval_module, op, _skip_events, tspan, kwargs...
     )
 
     ptype = getmetadata(sys, ProblemTypeCtx, StandardODEProblem())
     args = (; f, u0, tspan, p, ptype)
-    maybe_codegen_scimlproblem(expression, ODEProblem{iip}, args; kwargs...)
+    maybe_codegen_scimlproblem(expression, ODEProblem{_iip}, args; kwargs...)
 end
 
 @fallback_iip_specialize function DiffEqBase.SteadyStateProblem{iip, spec}(
@@ -125,17 +142,18 @@ end
     check_complete(sys, SteadyStateProblem)
     check_compatibility && check_compatible_system(SteadyStateProblem, sys)
 
+    _iip = resolve_iip(iip, op)
     f, u0,
         p = process_SciMLProblem(
-        ODEFunction{iip}, sys, op;
+        ODEFunction{_iip}, sys, op;
         steady_state = true, check_length, check_compatibility, expression,
         is_steadystateprob = true, kwargs...
     )
 
-    kwargs = process_kwargs(sys; expression, kwargs...)
+    kwargs = process_kwargs(sys; expression, tspan = (0, Inf), kwargs...)
     args = (; f, u0, p)
 
-    maybe_codegen_scimlproblem(expression, SteadyStateProblem{iip}, args; kwargs...)
+    maybe_codegen_scimlproblem(expression, SteadyStateProblem{_iip}, args; kwargs...)
 end
 
 function check_compatible_system(

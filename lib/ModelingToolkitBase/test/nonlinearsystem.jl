@@ -311,19 +311,22 @@ end
     @parameters σ ρ β
     eqs = [
         0 ~ σ * (y - x)
-        0 ~ x * (ρ - z) - y
         0 ~ x * y - β * z
     ]
-    guesses = [x => 1.0, y => 1.0, z => 0.0]
+    obs = [
+        y ~ x * (ρ - z),
+    ]
+    guesses = [x => 1.0, z => 0.0]
     ps = [σ => 10.0, ρ => 26.0, β => 8 / 3]
-    @mtkcompile ns = System(eqs)
+    @named ns = System(eqs, [x, z], [σ, ρ, β]; observed = obs)
+    ns = complete(ns)
 
     @test isequal(
         calculate_jacobian(ns), [
             (-1 - z + ρ) * σ -x * σ
             2x * (-z + ρ) -β - (x^2)
         ]
-    ) broken = !@isdefined(ModelingToolkit)
+    )
     # solve without analytical jacobian
     prob = NonlinearProblem(ns, [guesses; ps])
     sol = solve(prob, NewtonRaphson())
@@ -336,17 +339,22 @@ end
 
     # system that contains a chain of observed variables when simplified
     @variables x y z
-    eqs = [0 ~ x^2 + 2z + y, z ~ y, y ~ x] # analytical solution x = y = z = 0 or -3
-    @mtkcompile ns = System(eqs) # solve for y with observed chain z -> y -> x
+    eqs = [
+        0 ~ y - z,
+    ]
+    obs = [
+        y ~ x
+        z ~ (x^2 + y) / (-2)
+    ]
+    @named ns = System(eqs, [x], []; observed = obs) # solve for y with observed chain z -> y -> x
+    ns = complete(ns)
     mtkjac = expand.(calculate_jacobian(ns))
-    jac1 = unwrap.([3 // 2 + y;;])
-    jac2 = unwrap.([-3 // 2 - x;;])
-    @test isequal(mtkjac, jac1) || isequal(mtkjac, jac2) broken = !@isdefined(ModelingToolkit)
+    jac1 = unwrap.([3 // 2 + x;;])
+    @test isequal(mtkjac, jac1)
     mtkhess = calculate_hessian(ns)
     hess1 = [Num[1;;]]
-    hess2 = [Num[-1;;]]
-    @test isequal(mtkhess, hess1) || isequal(mtkhess, hess2) broken = !@isdefined(ModelingToolkit)
-    prob = NonlinearProblem(ns, unknowns(ns) .=> -4.0) # give guess < -3 to reach -3
+    @test isequal(mtkhess, hess1)
+    prob = NonlinearProblem(ns, [x => -4.0]) # give guess < -3 to reach -3
     sol = solve(prob, NewtonRaphson())
     @test sol[x] ≈ sol[y] ≈ sol[z] ≈ -3
 end
@@ -506,4 +514,57 @@ end
     )
     prob = NonlinearProblem(sys, [x => 1.0])
     @test prob.problem_type == "A"
+end
+
+@testset "Bounds metadata is forwarded to `NonlinearProblem`/`NonlinearLeastSquaresProblem`" begin
+    # The two roots of `x^2 - 4x + 3` are 1 and 3. Bounds select which root the solver
+    # can reach, so they double as a check that the bounds actually reach the solver.
+    @variables x [bounds = (0.0, 2.0)]
+    @mtkcompile sys = System([0 ~ x^2 - 4x + 3])
+
+    prob = NonlinearProblem(sys, [x => 1.5])
+    @test prob.lb == [0.0]
+    @test prob.ub == [2.0]
+    sol = solve(prob)
+    @test SciMLBase.successful_retcode(sol)
+    @test sol[x] ≈ 1.0 atol = 1.0e-6
+
+    @variables xu [bounds = (2.5, 4.0)]
+    @mtkcompile sysu = System([0 ~ xu^2 - 4xu + 3])
+    solu = solve(NonlinearProblem(sysu, [xu => 3.5]))
+    @test SciMLBase.successful_retcode(solu)
+    @test solu[xu] ≈ 3.0 atol = 1.0e-6
+
+    # `NonlinearLeastSquaresProblem` gets the bounds too.
+    lsq = NonlinearLeastSquaresProblem(sys, [x => 1.5])
+    @test lsq.lb == [0.0]
+    @test lsq.ub == [2.0]
+
+    # `remake` keeps the bounds around.
+    prob2 = remake(prob; u0 = [1.2])
+    @test prob2.lb == [0.0]
+    @test prob2.ub == [2.0]
+
+    # Unknowns without bounds metadata produce no bounds, leaving the problem untouched.
+    @variables a b
+    @mtkcompile nosys = System([0 ~ a^2 - 2, 0 ~ b - a])
+    nob = NonlinearProblem(nosys, [a => 1.0, b => 1.0])
+    @test nob.lb === nothing
+    @test nob.ub === nothing
+    @test SciMLBase.successful_retcode(solve(nob))
+
+    # Partial bounds: only the bounded unknown gets finite bounds, aligned to `unknowns`.
+    @variables c [bounds = (-1.0, 1.0)] d
+    @mtkcompile psys = System([0 ~ c^2 + d^2 - 1, 0 ~ c^2 - d^2 - 0.5])
+    pprob = NonlinearProblem(psys, [c => 0.8, d => 0.4])
+    dvs = unknowns(psys)
+    ci = findfirst(isequal(c), dvs)
+    di = findfirst(isequal(d), dvs)
+    @test pprob.lb[ci] == -1.0 && pprob.ub[ci] == 1.0
+    @test pprob.lb[di] == -Inf && pprob.ub[di] == Inf
+
+    # Explicitly supplied `lb`/`ub` take precedence over the metadata.
+    uprob = NonlinearProblem(sys, [x => 1.5]; lb = [-10.0], ub = [10.0])
+    @test uprob.lb == [-10.0]
+    @test uprob.ub == [10.0]
 end

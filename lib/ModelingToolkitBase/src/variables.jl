@@ -366,7 +366,7 @@ end
 distribute_shift(eq::Equation) = distribute_shift(eq.lhs) ~ distribute_shift(eq.rhs)
 distribute_shift(var::Union{Num, Arr}) = distribute_shift(unwrap(var))
 """
-Distribute a shift applied to a whole expression or equation. 
+Distribute a shift applied to a whole expression or equation.
 Shift(t, 1)(x + y) will become Shift(t, 1)(x) + Shift(t, 1)(y).
 Only shifts variables whose independent variable is the same t that appears in the Shift (i.e. constants, time-independent parameters, etc. do not get shifted).
 """
@@ -463,6 +463,40 @@ end
 function setbounds(x::Num, bounds)
     (lb, ub) = bounds
     return setmetadata(x, VariableBounds, (lb, ub))
+end
+
+## Nominal =====================================================================
+struct VariableNominal end
+Symbolics.option_to_metadata_type(::Val{:nominal}) = VariableNominal
+
+"""
+    getnominal(x)
+
+Get the nominal value associated with symbolic variable `x`. Returns `1.0` if no nominal value is set.
+Create variables with a nominal value like this
+
+```
+@variables x [nominal = 4785.0]
+```
+"""
+getnominal(x::Union{Num, Symbolics.Arr}) = getnominal(unwrap(x))
+function getnominal(x::SymbolicT)
+    s = Symbolics.getmetadata_maybe_indexed(x, VariableNominal, nothing)
+    return s === nothing ? 1.0 : s
+end
+
+"""
+    hasnominal(x)
+
+Determine whether symbolic variable `x` has a nominal value associated with it.
+See also [`getnominal`](@ref).
+"""
+function hasnominal(x)
+    return Symbolics.getmetadata_maybe_indexed(unwrap(x), VariableNominal, nothing) !== nothing
+end
+
+function setnominal(x::Num, val)
+    return setmetadata(x, VariableNominal, val)
 end
 
 ## Disturbance =================================================================
@@ -608,6 +642,26 @@ function getbounds(p::AbstractVector)
     return (; lb, ub)
 end
 
+"""
+    getnominal(sys::ModelingToolkitBase.AbstractSystem, vars = parameters(sys))
+
+Returns a dict with pairs `var => nominal` mapping variables of `sys` to their nominal values.
+Create variables with a nominal value like this
+
+```
+@variables x [nominal = 40.0]
+```
+
+To obtain unknown variable nominal values, call `getnominal(sys, unknowns(sys))`
+"""
+function getnominal(sys::ModelingToolkitBase.AbstractSystem, p = parameters(sys))
+    return Dict(p .=> getnominal.(p))
+end
+
+function getnominal(p::AbstractVector)
+    return getnominal.(p)
+end
+
 ## Description =================================================================
 """
     $TYPEDEF
@@ -732,17 +786,15 @@ function _poissonians(exprs...)
         push!(names, name)
         # Create the symbolic variable using Symbolics.variable and set poissonian metadata
         # Symbolics.variable creates a proper Sym{VartypeT} with VariableSource metadata
-        push!(assignments, quote
-            $name = $topoissonian($(Symbolics.variable)($(QuoteNode(name))), $rate)
-        end)
+        push!(
+            assignments, quote
+                $name = $topoissonian($(Symbolics.variable)($(QuoteNode(name))), $rate)
+            end
+        )
     end
 
-    # Return the variables as a tuple (or single if only one)
-    if length(names) == 1
-        return Expr(:block, assignments..., names[1])
-    else
-        return Expr(:block, assignments..., Expr(:tuple, names...))
-    end
+    # Return the variables as a Vector, consistent with @variables and @brownians
+    return Expr(:block, assignments..., Expr(:vect, names...))
 end
 
 ## Guess ======================================================================
@@ -805,7 +857,7 @@ getmisc(x::SymbolicT) = Symbolics.getmetadata(x, VariableMisc, nothing)
     hasmisc(x)
 
 Determine whether a symbolic variable `x` has misc
-metadata associated with it. 
+metadata associated with it.
 
 See also [`getmisc(x)`](@ref).
 """
@@ -845,15 +897,15 @@ An operator that evaluates time-dependent variables at a specific absolute time 
 - `t::Union{SymbolicT, Number}`: The absolute time at which to evaluate the variable.
 
 # Description
-`EvalAt` is used to evaluate time-dependent variables at a specific time point. This is particularly 
-useful in optimization problems where you need to specify constraints or costs at particular moments 
+`EvalAt` is used to evaluate time-dependent variables at a specific time point. This is particularly
+useful in optimization problems where you need to specify constraints or costs at particular moments
 in time, or delay differential equations for setting a delay time.
 
-The operator works by replacing the time argument of time-dependent variables with the specified 
+The operator works by replacing the time argument of time-dependent variables with the specified
 time `t`. For variables that don't depend on time, `EvalAt` returns them unchanged.
 
 # Behavior
-- For time-dependent variables like `x(t)`, `EvalAt(τ)(x)` returns `x(τ)` 
+- For time-dependent variables like `x(t)`, `EvalAt(τ)(x)` returns `x(τ)`
 - For time-independent parameters, `EvalAt` returns them unchanged
 - For derivatives, `EvalAt` evaluates the derivative at the specified time
 - For arrays of variables, `EvalAt` is applied element-wise
@@ -875,13 +927,6 @@ EvalAt(1.0)(p)  # Returns p
 # Works with derivatives
 D = Differential(t)
 EvalAt(1.0)(D(x))  # Returns D(x) evaluated at t=1.0
-
-# Use in optimization constraints
-@optimization_model model begin
-    @constraints begin
-        EvalAt(0.5)(x) ~ 2.0  # x must equal 2.0 at t=0.5
-    end
-end
 ```
 
 # Errors

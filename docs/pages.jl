@@ -47,6 +47,7 @@ pages = [
     "Basics" => Any[
         "basics/Composition.md",
         "basics/Events.md",
+        "basics/Homotopy.md",
         "basics/Linearization.md",
         "basics/InputOutput.md",
         "basics/MTKLanguage.md",
@@ -54,6 +55,7 @@ pages = [
         "basics/Debugging.md",
         "basics/DependencyGraphs.md",
         "basics/Precompilation.md",
+        "basics/PrecompileComponents.md",
         "basics/FAQ.md",
     ],
     "comparison.md",
@@ -61,5 +63,6 @@ pages = [
         "internals.md",
         "internals/structural_transformation.md",
         "internals/bipartite_graph.md",
+        "internals/systems.md",
     ],
 ]

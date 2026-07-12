@@ -199,10 +199,10 @@ end
         @variables A(t) B(t)
         @parameters k1 k2
 
-        maj1 = MassActionJump(k1, [A => 1], [A => -1, B => 1])
+        maj1 = SymbolicMassActionJump(k1, [A => 1], [A => -1, B => 1])
         @named sys1 = JumpSystem([maj1], t, [A, B], [k1])
 
-        maj2 = MassActionJump(k2, [B => 1], [B => -1, A => 1])
+        maj2 = SymbolicMassActionJump(k2, [B => 1], [B => -1, A => 1])
         @named sys2 = JumpSystem([maj2], t, [A, B], [k2])
 
         extended = extend(sys2, sys1; name = :extended)
@@ -329,12 +329,16 @@ end
         @brownians w
 
         # Base system with initial condition
-        @named base = System([D(x) ~ a * x + w], t, [x], [a], [w];
-            initial_conditions = Dict(x => 1.0))
+        @named base = System(
+            [D(x) ~ a * x + w], t, [x], [a], [w];
+            initial_conditions = Dict(x => 1.0)
+        )
 
         # Extending system with different initial condition
-        @named ext = System(Equation[], t, [], [], [];
-            initial_conditions = Dict(x => 2.0))
+        @named ext = System(
+            Equation[], t, [], [], [];
+            initial_conditions = Dict(x => 2.0)
+        )
 
         extended = extend(ext, base; name = :result)
 

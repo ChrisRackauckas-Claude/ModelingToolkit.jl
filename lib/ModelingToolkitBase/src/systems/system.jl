@@ -24,6 +24,45 @@ Utility metadata key for adding miscellaneous/one-off metadata to systems.
 abstract type MiscSystemData end
 
 """
+    $TYPEDEF
+
+Metadata key used to mark a system as incompatible with symbolic automatic differentiation.
+When set on a system via `setmetadata(sys, SymbolicADDisallowed, reason)`, any attempt to
+perform symbolic AD on the equations of that system (e.g. via `calculate_jacobian`,
+`calculate_tgrad`, `linearize_symbolic`, or during structural simplification) will throw
+an error. The value associated with this key should be a descriptive `String` explaining
+why symbolic AD is unsupported, or `true` if no explanation is available.
+
+See also: [`check_symbolic_ad_allowed`](@ref).
+"""
+abstract type SymbolicADDisallowed end
+
+"""
+    check_symbolic_ad_allowed(sys::AbstractSystem)
+
+Check whether `sys` supports symbolic automatic differentiation. Throws an `ArgumentError`
+if the system has been marked with [`SymbolicADDisallowed`](@ref).
+"""
+function check_symbolic_ad_allowed(sys::AbstractSystem)
+    return if SymbolicUtils.hasmetadata(sys, SymbolicADDisallowed)
+        reason = SymbolicUtils.getmetadata(sys, SymbolicADDisallowed, nothing)
+        msg = "System $(nameof(sys)) does not support symbolic automatic differentiation."
+        if reason isa AbstractString && !isempty(reason)
+            msg *= " $reason"
+        end
+        throw(ArgumentError(msg))
+    end
+end
+
+__new_irstructure() = IRStructure{VartypeT}()
+__new_irstructure_tlv() = TaskLocalValue{IRStructure{VartypeT}}(__new_irstructure)
+const IRStructureTLVT = typeof(__new_irstructure_tlv())
+
+__new_mutable_cache() = MutableCacheT()
+__new_mutable_cache_tlv() = TaskLocalValue{MutableCacheT}(__new_mutable_cache)
+const MutableCacheTLVT = typeof(__new_mutable_cache_tlv())
+
+"""
     $(TYPEDEF)
 
 A symbolic representation of a numerical system to be solved. This is a recursive
@@ -61,6 +100,8 @@ struct System <: IntermediateDeprecationSystem
     """
     Jumps associated with the system. Each jump can be a `VariableRateJump`,
     `ConstantRateJump` or `MassActionJump`. See `JumpProcesses.jl` for more information.
+    `MassActionJump`s must use `scale_rates = false` (pre-scaled rate expressions); see
+    [`SymbolicMassActionJump`](@ref).
     """
     jumps::Vector{JumpType}
     """
@@ -281,6 +322,15 @@ struct System <: IntermediateDeprecationSystem
     """
     irreducibles::AtomicSetT
     """
+    Expressions which may be zero and should be given special consideration during simplification.
+    """
+    maybe_zeros::AtomicSetT
+    """
+    $INTERNAL_FIELD_WARNING
+    The `IRStructure` used for efficient symbolic manipulation, stored in a `TaskLocalValue`.
+    """
+    irstructure_tlv::TaskLocalValue{IRStructure{VartypeT}}
+    """
     $INTERNAL_FIELD_WARNING
     Whether the system has been simplified by `mtkcompile`.
     """
@@ -303,8 +353,9 @@ struct System <: IntermediateDeprecationSystem
             ignored_connections = nothing,
             preface = nothing, parent = nothing, initializesystem = nothing,
             is_initializesystem = false, is_discrete = false, state_priorities = AtomicMapT{Int}(),
-            irreducibles = AtomicSetT(), isscheduled = false,
-            schedule = nothing; checks::Union{Bool, Int} = true
+            irreducibles = AtomicSetT(), maybe_zeros = AtomicSetT(),
+            irstructure_tlv = __new_irstructure_tlv(), isscheduled = false, schedule = nothing;
+            checks::Union{Bool, Int} = true
         )
         if is_initializesystem && iv !== nothing
             throw(
@@ -334,11 +385,13 @@ struct System <: IntermediateDeprecationSystem
             end
             N1 == Neq || throw(IllFormedNoiseEquationsError(N1, Neq))
             if noise_eqs !== nothing && !isempty(brownians)
-                throw(ArgumentError(
-                    "A system cannot have both `noise_eqs` and `brownians` specified. " *
-                    "Use either `noise_eqs` (a matrix of noise coefficients) or " *
-                    "`brownians` (symbolic brownian variables in equations), but not both."
-                ))
+                throw(
+                    ArgumentError(
+                        "A system cannot have both `noise_eqs` and `brownians` specified. " *
+                            "Use either `noise_eqs` (a matrix of noise coefficients) or " *
+                            "`brownians` (symbolic brownian variables in equations), but not both."
+                    )
+                )
             end
             check_equations(equations(continuous_events), iv)
             check_subsystems(systems)
@@ -364,7 +417,7 @@ struct System <: IntermediateDeprecationSystem
             tstops, inputs, outputs, tearing_state, namespacing,
             complete, index_cache, parameter_bindings_graph, ignored_connections,
             preface, parent, initializesystem, is_initializesystem, is_discrete,
-            state_priorities, irreducibles,
+            state_priorities, irreducibles, maybe_zeros, irstructure_tlv,
             isscheduled, schedule
         )
     end
@@ -453,9 +506,10 @@ function System(
         is_dde = nothing, inputs = OrderedSet{SymbolicT}(),
         outputs = OrderedSet{SymbolicT}(), tearing_state = nothing,
         ignored_connections = nothing, parent = nothing, state_priorities = AtomicMapT{Int}(),
-        irreducibles = AtomicSetT(),
+        irreducibles = AtomicSetT(), maybe_zeros = AtomicSetT(),
         description = "", name = nothing, discover_from_metadata = true,
         initializesystem = nothing, is_initializesystem = false, is_discrete = false,
+        irstructure = IRStructure{VartypeT}(), irstructure_tlv = nothing,
         checks = true, __legacy_defaults__ = nothing
     )
     name === nothing && throw(NoNameError())
@@ -563,23 +617,14 @@ function System(
         collect_metadata!(VariableStatePriority, state_priorities, dvs)
         collect_metadata!(VariableIrreducible, irreducibles, dvs)
     end
+    maybe_zeros = as_atomic_array_set(maybe_zeros)
 
     filter!(!(Base.Fix1(===, COMMON_NOTHING) ∘ last), initial_conditions)
     filter!(!(Base.Fix1(===, COMMON_NOTHING) ∘ last), bindings)
     filter!(!(Base.Fix1(===, COMMON_NOTHING) ∘ last), guesses)
 
     if iv === nothing
-        filterer = let initial_conditions = initial_conditions, all_dvs = all_dvs
-            function _filterer(kvp)
-                k = kvp[1]
-                if k in all_dvs
-                    initial_conditions[k] = kvp[2]
-                    return false
-                end
-                return true
-            end
-        end
-        filter!(filterer, bindings)
+        move_variable_bindings_to_ics!(all_dvs, initial_conditions, bindings)
     end
 
     check_bindings(ps, bindings)
@@ -620,6 +665,28 @@ function System(
     end
     metadata = refreshed_metadata(metadata)
     jumps = Vector{JumpType}(jumps)
+    # MTK requires symbolic MassActionJumps to have pre-scaled rate expressions.
+    # JumpProcesses must not re-apply factorial scaling on parameter updates.
+    for j in jumps
+        if j isa MassActionJump && j.rescale_rates_on_update
+            throw(
+                ArgumentError(
+                    "MassActionJump with rescale_rates_on_update = true is not supported " *
+                        "in Systems with jumps or JumpSystems. Rate expressions must be pre-scaled (e.g. " *
+                        "k/factorial(n) for n-th order reactions). Use SymbolicMassActionJump " *
+                        "or pass scale_rates = false when constructing the MassActionJump."
+                )
+            )
+        end
+    end
+
+    if irstructure_tlv === nothing
+        irstructure_tlv = __new_irstructure_tlv()
+        if !iszero(length(irstructure))
+            irstructure_tlv[] = irstructure
+        end
+    end
+
     return System(
         __get_new_tag(), eqs, noise_eqs, jumps, constraints,
         costs, consolidate, dvs, ps, brownians, poissonians, iv, observed,
@@ -627,7 +694,8 @@ function System(
         continuous_events, discrete_events, connector_type, assertions, metadata, gui_metadata, is_dde,
         tstops, inputs, outputs, tearing_state, true, false,
         nothing, nothing, ignored_connections, preface, parent,
-        initializesystem, is_initializesystem, is_discrete, state_priorities, irreducibles; checks
+        initializesystem, is_initializesystem, is_discrete, state_priorities, irreducibles,
+        maybe_zeros, irstructure_tlv; checks
     )
 end
 
@@ -770,6 +838,13 @@ function System(eqs::Vector{Equation}, iv; kwargs...)
         collect_vars!(allunknowns, ps, arguments(v)[1], iv)
     end
 
+    for pair in get(kwargs, :initial_conditions, ())
+        collect_vars!(allunknowns, ps, pair, iv)
+    end
+    for pair in get(kwargs, :bindings, ())
+        collect_vars!(allunknowns, ps, pair, iv)
+    end
+
     new_ps = gather_array_params(ps)
 
     noiseeqs = get(kwargs, :noise_eqs, nothing)
@@ -818,6 +893,13 @@ function System(eqs::Vector{Equation}; kwargs...)
         collect_vars!(allunknowns, ps, eq, nothing)
     end
 
+    for pair in get(kwargs, :initial_conditions, ())
+        collect_vars!(allunknowns, ps, pair, nothing)
+    end
+    for pair in get(kwargs, :bindings, ())
+        collect_vars!(allunknowns, ps, pair, nothing)
+    end
+
     new_ps = gather_array_params(ps)
 
     return System(eqs, nothing, collect(allunknowns), collect(new_ps); kwargs...)
@@ -830,7 +912,7 @@ Create a `System` with a single equation `eq`.
 """
 System(eq::Equation, args...; kwargs...) = System([eq], args...; kwargs...)
 
-function gather_array_params(ps)
+function gather_array_params(ps::AbstractSet{SymbolicT})
     new_ps = OrderedSet{SymbolicT}()
     for p in ps
         arr, isarr = split_indexed_var(p)
@@ -1029,6 +1111,7 @@ function flatten(sys::System, noeqs = false)
         inputs = inputs(sys), outputs = outputs(sys),
         state_priorities = state_priorities(sys),
         irreducibles = irreducibles(sys),
+        maybe_zeros = maybe_zeros(sys),
         # without this, any initial conditions/bindings/guesses obtained from metadata that
         # were later removed by the user will be re-added. Right now, we just want to
         # retain `initial_conditions(sys)` as-is.
@@ -1093,7 +1176,7 @@ end
 
 Get the metadata associated with key `k` in system `sys` or `default` if it does not exist.
 """
-function SymbolicUtils.getmetadata(sys::AbstractSystem, k::DataType, default)
+function SymbolicUtils.getmetadata(sys::AbstractSystem, @nospecialize(k::DataType), default)
     meta = get_metadata(sys)
     return get(meta, k, default)
 end
@@ -1105,7 +1188,7 @@ Set the metadata associated with key `k` in system `sys` to value `v`. This is a
 out-of-place operation, and will return a shallow copy of `sys` with the appropriate
 metadata values.
 """
-function SymbolicUtils.setmetadata(sys::AbstractSystem, k::DataType, v)
+function SymbolicUtils.setmetadata(sys::AbstractSystem, @nospecialize(k::DataType), @nospecialize(v))
     meta = get_metadata(sys)
     meta = Base.ImmutableDict(meta, k => v)::MetadataT
     return @set sys.metadata = meta
@@ -1241,12 +1324,42 @@ function OptimizationSystem(cost::Array, dvs, ps; kwargs...)
 end
 
 """
+    SymbolicMassActionJump(rate, reactant_stoch, net_stoch; kwargs...)
+
+Construct a `MassActionJump` with `scale_rates = false`, suitable for use in a
+`JumpSystem`. The rate expression must already include any desired combinatorial scaling
+(e.g. `k / factorial(n)` for a reaction like `n*A --> ...`).
+
+Returns a `MassActionJump` — this is a convenience constructor, not a new type.
+"""
+function SymbolicMassActionJump(
+        rate, reactant_stoch, net_stoch; scale_rates = false,
+        kwargs...
+    )
+    if scale_rates
+        throw(
+            ArgumentError(
+                "SymbolicMassActionJump requires pre-scaled rate expressions " *
+                    "(scale_rates = false). scale_rates = true is not supported in " *
+                    "ModelingToolkitBase."
+            )
+        )
+    end
+    return MassActionJump(rate, reactant_stoch, net_stoch; scale_rates = false, kwargs...)
+end
+
+"""
     $(TYPEDSIGNATURES)
 
 Construct a [`System`](@ref) to solve a system of jump equations. `jumps` is an array of
-jumps, expressed using `JumpProcesses.MassActionJump`, `JumpProcesses.ConstantRateJump`
-and `JumpProcesses.VariableRateJump`. It can also include standard equations to simulate
+jumps, expressed using `JumpProcesses.ConstantRateJump`, `JumpProcesses.VariableRateJump`,
+and `JumpProcesses.MassActionJump`. It can also include standard equations to simulate
 jump-diffusion processes. `iv` should be the independent variable of the system.
+
+`MassActionJump`s must be constructed with `scale_rates = false` (pre-scaled rate
+expressions). Use [`SymbolicMassActionJump`](@ref) for convenience, which handles this
+automatically. JumpProcesses will not re-apply factorial scaling on parameter updates for
+jumps constructed through the MTK pipeline.
 
 All keyword arguments are the same as those of the [`System`](@ref) constructor.
 """
@@ -1262,6 +1375,8 @@ end
 
 Identical to the 2-argument `JumpSystem` constructor, but uses the explicitly provided
 `dvs` and `ps` for unknowns and parameters of the system.
+
+See the 2-argument [`JumpSystem`](@ref) for details on `MassActionJump` requirements.
 """
 function JumpSystem(jumps, iv, dvs, ps; kwargs...)
     mask = isa.(jumps, Equation)
@@ -1412,7 +1527,7 @@ function Base.showerror(io::IO, err::EventsInTimeIndependentSystemError)
 end
 
 function supports_initialization(sys::System)
-    return isempty(get_systems(sys)) && isempty(jumps(sys)) &&
+    return isempty(get_systems(sys)) && isempty(get_jumps(sys)) &&
         isempty(get_costs(sys)) && isempty(get_constraints(sys))
 end
 
@@ -1467,6 +1582,8 @@ function Base.isapprox(sysa::System, sysb::System)
         isequal(get_is_initializesystem(sysa), get_is_initializesystem(sysb)) &&
         isequal(get_is_discrete(sysa), get_is_discrete(sysb)) &&
         isequal(get_state_priorities(sysa), get_state_priorities(sysb)) &&
+        isequal(get_irreducibles(sysa), get_irreducibles(sysb)) &&
+        isequal(get_maybe_zeros(sysa), get_maybe_zeros(sysb)) &&
         isequal(get_isscheduled(sysa), get_isscheduled(sysb))
 end
 
@@ -1489,6 +1606,234 @@ function Base.copy(sys::System)
         _maybe_copy(get_preface(sys)), _maybe_copy(get_parent(sys)),
         _maybe_copy(get_initializesystem(sys)), get_is_initializesystem(sys),
         get_is_discrete(sys), copy(get_state_priorities(sys)), copy(get_irreducibles(sys)),
+        copy(get_maybe_zeros(sys)),
         copy(get_isscheduled(sys)), _maybe_copy(get_schedule(sys)); checks = false
     )
+end
+
+# Mutable system cache
+"""
+    $TYPEDSIGNATURES
+
+If the mutable cache of `sys` contains an entry for key `K` return it. Otherwise,
+return `default`. `V` is the expected type of the cache entry, if it exists.
+"""
+function check_mutable_cache(
+        sys::System, @nospecialize(K::DataType), ::Type{V}, default::D
+    )::Union{V, D} where {V, D}
+    cache_tlv = getmetadata(sys, MutableCacheKey, nothing)
+    cache_tlv isa MutableCacheTLVT || return default
+    cache = cache_tlv[]::MutableCacheT
+    return get(cache, K, default)::Union{V, D}
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Store into the mutable cache of `sys` the key-value pair `K => value`.
+"""
+function store_to_mutable_cache!(sys::System, @nospecialize(K::DataType), value)
+    cache_tlv = getmetadata(sys, MutableCacheKey, nothing)
+    cache_tlv isa MutableCacheTLVT || return nothing
+    cache = cache_tlv[]::MutableCacheT
+    cache[K] = value
+    return nothing
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Return a `Bool` indicating whether the cached entry associated with key `K` should be
+invalidated if the given `patch` is applied to the system. By default, entries will be
+invalidated on all patches.
+"""
+function should_invalidate_mutable_cache_entry(
+        @nospecialize(K::DataType),
+        @nospecialize(patch::NamedTuple)
+    )
+    return true
+end
+
+abstract type LinearExpansionCache end
+
+const LinearExpansionCacheT = Dict{Tuple{SymbolicT, Bool}, Symbolics.LinearExpander}
+
+function should_invalidate_mutable_cache_entry(
+        ::Type{LinearExpansionCache}, @nospecialize(patch::NamedTuple)
+    )
+    return false
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Get a cached `Symbolics.LinearExpander` for variable `var` and strictness `strict`. This
+allows reusing significant cached information between `LinearExpander` calls. This cache
+is never invalidated.
+"""
+function get_linear_expander_for!(sys::System, var::SymbolicT, strict::Bool)
+    cache = check_mutable_cache(sys, LinearExpansionCache, LinearExpansionCacheT, nothing)
+    if cache === nothing
+        cache = LinearExpansionCacheT()
+        store_to_mutable_cache!(sys, LinearExpansionCache, cache)
+    end
+    return get!(() -> Symbolics.LinearExpander(var; strict), cache, (var, strict))
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Get the `IRStructure` associated with the system.
+"""
+function get_irstructure(sys::System)
+    return get_irstructure_tlv(sys)[]::IRStructure{SymReal}
+end
+
+# Reversible transformation API
+
+abstract type ReversibleTransformations end
+
+"""
+    $TYPEDSIGNATURES
+
+Add `tf` to the list of reversible transformations applied to `sys`. Returns a modified
+copy of `sys`. Reversible transformations must define [`reverse_transformation`](@ref).
+They can also define several functions to determine when they are reversed. Transformations
+are reversed in the reverse order of application.
+"""
+function with_reversible_transformation(sys::System, @nospecialize(tf))
+    prev_tfs = getmetadata(sys, ReversibleTransformations, nothing)::Union{Nothing, Vector{Any}}
+    new_tfs::Vector{Any} = if prev_tfs === nothing
+        []
+    else
+        copy(prev_tfs)
+    end
+    push!(new_tfs, tf)
+    return setmetadata(sys, ReversibleTransformations, new_tfs)
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Check if any of the reversible transformations applied to `sys` satisfy the predicate `f`.
+"""
+function any_reversible_transformation(f::F, sys::System) where {F}
+    tfs = getmetadata(sys, ReversibleTransformations, nothing)::Union{Nothing, Vector{Any}}
+    return any(f, tfs)
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Filter the reversible transformations applied to `sys`. Return a new system with the
+updated list of transformations.
+"""
+function filter_reversible_transformations(fn::F, sys::System) where {F}
+    prev_tfs = getmetadata(sys, ReversibleTransformations, [])::Union{Nothing, Vector{Any}}
+    new_tfs::Vector{Any} = if prev_tfs === nothing
+        []
+    else
+        copy(prev_tfs)
+    end
+    filter!(fn, new_tfs)
+    return setmetadata(sys, ReversibleTransformations, new_tfs)
+end
+
+"""
+    function reverse_transformation(sys::System, tf)
+
+Reverse a reversible transformation ([`with_reversible_transformation`](@ref)) applied to `sys`.
+"""
+function reverse_transformation end
+
+"""
+    $TYPEDSIGNATURES
+
+Return a boolean indicating whether the transformation `tf` is reversed by default
+when performing operations that require reversing such transformations. Defaults to
+`true` for all transformations.
+"""
+reverse_transformation_by_default(@nospecialize(tf)) = true
+
+"""
+    $TYPEDSIGNATURES
+
+Return a boolean indicating whether the transformation `tf` is reversed by default
+when building the initialization system.
+"""
+function reverse_transformation_during_initialization(@nospecialize(tf))
+    return reverse_transformation_by_default(tf)
+end
+
+function __reverse_transformations_helper(fn::F, sys::System) where {F}
+    tfs = getmetadata(sys, ReversibleTransformations, [])::Vector{Any}
+    new_tfs = []
+    for tf in Iterators.reverse(tfs)
+        if !fn(tf)::Bool
+            push!(new_tfs, tf)
+            continue
+        end
+        sys = reverse_transformation(sys, tf)::System
+    end
+    reverse!(new_tfs)
+    return setmetadata(sys, ReversibleTransformations, new_tfs)::System
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Reverse all reversible transformations ([`with_reversible_transformation`](@ref)) applied
+to `sys` for which [`reverse_transformation_by_default`](@ref) is `true`.
+"""
+function reverse_all_default_reversible_transformations(sys::System)
+    return __reverse_transformations_helper(reverse_transformation_by_default, sys)
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Reverse all reversible transformations ([`with_reversible_transformation`](@ref)) applied
+to `sys` for which [`reverse_transformation_during_initialization`](@ref) is `true`.
+"""
+function reverse_transformations_for_initialization(sys::System)
+    return __reverse_transformations_helper(reverse_transformation_during_initialization, sys)
+end
+
+# Necessary Initial Conditions API
+
+# Metadata key
+abstract type NecessaryInitialConditions end
+const NecessaryInitialConditionsT = OrderedDict{SymbolicT, Union{String, LazyString}}
+
+"""
+    $TYPEDSIGNATURES
+
+Get a map from variables in `sys` whose initial conditions are required to a `String`
+reason for why they are required. This can be mutated to change the necessary
+initial conditions. After mutation, [`set_necessary_initial_conditions`](@ref) MUST
+be called with the mutated map.
+"""
+function get_necessary_initial_conditions(sys::System)
+    if !isempty(get_systems(sys))
+        throw(ArgumentError("This is only valid for flattened systems!"))
+    end
+    return @something(
+        getmetadata(
+            sys, NecessaryInitialConditions, nothing
+        )::Union{NecessaryInitialConditionsT, Nothing},
+        NecessaryInitialConditionsT()
+    )
+end
+
+"""
+    $TYPEDSIGNATURES
+
+See [`get_necessary_initial_conditions`](@ref).
+"""
+function set_necessary_initial_conditions(sys::System, ics)
+    if !isempty(get_systems(sys))
+        throw(ArgumentError("This is only valid for flattened systems!"))
+    end
+    get_necessary_initial_conditions(sys) === ics && return sys
+    return setmetadata(sys, NecessaryInitialConditions, ics)::System
 end

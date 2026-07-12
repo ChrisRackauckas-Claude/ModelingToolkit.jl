@@ -120,7 +120,7 @@ is_explicit(tableau) = tableau isa DiffEqBase.ExplicitRKTableau
 
 @fallback_iip_specialize function SciMLBase.ODEInputFunction{iip, specialize}(
         sys::System;
-        inputs = unbound_inputs(sys),
+        inputs = default_codegen_inputs(sys),
         disturbance_inputs = disturbances(sys),
         u0 = nothing, tgrad = false,
         jac = false, controljac = false,
@@ -296,15 +296,17 @@ function process_DynamicOptProblem(
         dt = nothing,
         steps = nothing,
         tune_parameters = false,
-        guesses = Dict(), kwargs...
+        guesses = Dict(),
+        bounds = Dict(), kwargs...
     )
     warn_overdetermined(sys, op)
-    ctrls = unbound_inputs(sys)
+    ctrls = inputs(sys)
     states = unknowns(sys)
     tunable_params = tune_parameters ? tunable_parameters(sys) : []
 
     stidxmap = Dict([v => i for (i, v) in enumerate(states)])
     op = Dict([default_toterm(value(k)) => v for (k, v) in op])
+    bounds = Dict([default_toterm(value(k)) => v for (k, v) in bounds])
     u0_idxs = has_alg_eqs(sys) ? collect(1:length(states)) :
         [stidxmap[default_toterm(k)] for (k, v) in op if haskey(stidxmap, k)]
 
@@ -326,6 +328,13 @@ function process_DynamicOptProblem(
     # Filter out tunable parameters - they should remain symbolic
     tunable_set = Set(default_toterm.(tunable_params))
     pmap = filter(kvp -> first(kvp) ∉ tunable_set, pmap)
+
+    # Resolve parameter bindings so observed equations and constraints
+    # referencing pre-binding names can be fully substituted.
+    for (k, v) in bindings(sys)
+        v === COMMON_MISSING && continue
+        haskey(pmap, v) && !haskey(pmap, k) && (pmap[k] = pmap[v])
+    end
 
     c0 = value.([pmap[c] for c in ctrls])
     p0, _ = SciMLStructures.canonicalize(SciMLStructures.Tunable(), p)
@@ -349,12 +358,12 @@ function process_DynamicOptProblem(
 
     merge!(pmap, Dict(tunable_params .=> P_syms))
 
-    set_variable_bounds!(fullmodel, sys, pmap, tspan[2])
+    set_variable_bounds!(fullmodel, sys, pmap, tspan[2], tunable_params, bounds)
     add_cost_function!(fullmodel, sys, tspan, pmap)
     add_user_constraints!(fullmodel, sys, tspan, pmap)
     add_initial_constraints!(fullmodel, u0, u0_idxs, model_tspan[1])
 
-    return prob_type(f, u0, tspan, p, fullmodel, kwargs...), pmap
+    return prob_type(f, u0, tspan, p, fullmodel; kwargs...), pmap
 end
 
 function generate_time_variable! end
@@ -384,31 +393,58 @@ function f_wrapper(f, Uₙ, Vₙ, p, P, t)
     end
 end
 
-function set_variable_bounds!(m, sys, pmap, tf)
-    @unpack model, U, V, tₛ = m
-    t = get_iv(sys)
-    for (i, u) in enumerate(unknowns(sys))
-        var = lowered_var(m, :U, i, t)
-        if hasbounds(u)
-            lo, hi = getbounds(u)
-            add_constraint!(m, var ≳ Symbolics.fixpoint_sub(lo, pmap))
-            add_constraint!(m, var ≲ Symbolics.fixpoint_sub(hi, pmap))
+"""
+    extract_variable_bounds(sys, pmap, tf, tunable_params)
+
+Extract and parameter-substitute variable bounds from the system.
+Returns `(; state_bounds, input_bounds, param_bounds, tf_bounds)` where each
+`*_bounds` is a `Dict{Int, Tuple{Any, Any}}` mapping variable index to `(lo, hi)`,
+and `tf_bounds` is either `nothing` or a `(lo, hi)` tuple.
+"""
+function extract_variable_bounds(sys, pmap, tf, tunable_params, user_bounds = Dict())
+    state_bounds = _extract_bounds(unknowns(sys), pmap)
+    input_bounds = _extract_bounds(inputs(sys), pmap)
+    param_bounds = _extract_bounds(tunable_params, pmap)
+    # Merge user-provided bounds (override metadata bounds)
+    dvs = unknowns(sys)
+    ctrls = inputs(sys)
+    for (var, (lo, hi)) in user_bounds
+        idx = findfirst(v -> isequal(v, var), dvs)
+        if !isnothing(idx)
+            state_bounds[idx] = (lo, hi)
+            continue
+        end
+        idx = findfirst(v -> isequal(v, var), ctrls)
+        if !isnothing(idx)
+            input_bounds[idx] = (lo, hi)
         end
     end
-    for (i, v) in enumerate(unbound_inputs(sys))
-        var = lowered_var(m, :V, i, t)
+    tf_bounds = if symbolic_type(tf) === ScalarSymbolic() && hasbounds(tf)
+        lo, hi = getbounds(tf)
+        (
+            SymbolicUtils.unwrap_const(unwrap(Symbolics.fixpoint_sub(lo, pmap))),
+            SymbolicUtils.unwrap_const(unwrap(Symbolics.fixpoint_sub(hi, pmap))),
+        )
+    else
+        nothing
+    end
+    return (; state_bounds, input_bounds, param_bounds, tf_bounds)
+end
+
+function _extract_bounds(vars, pmap)
+    bounds = Dict{Int, Tuple{Any, Any}}()
+    for (i, v) in enumerate(vars)
         if hasbounds(v)
             lo, hi = getbounds(v)
-            add_constraint!(m, var ≳ Symbolics.fixpoint_sub(lo, pmap))
-            add_constraint!(m, var ≲ Symbolics.fixpoint_sub(hi, pmap))
+            lo = SymbolicUtils.unwrap_const(unwrap(Symbolics.fixpoint_sub(lo, pmap)))
+            hi = SymbolicUtils.unwrap_const(unwrap(Symbolics.fixpoint_sub(hi, pmap)))
+            bounds[i] = (lo, hi)
         end
     end
-    return if symbolic_type(tf) === ScalarSymbolic() && hasbounds(tf)
-        lo, hi = getbounds(tf)
-        set_lower_bound(tₛ, Symbolics.fixpoint_sub(lo, pmap))
-        set_upper_bound(tₛ, Symbolics.fixpoint_sub(hi, pmap))
-    end
+    return bounds
 end
+
+function set_variable_bounds! end
 
 is_free_final(model) = model.is_free_final
 
@@ -418,6 +454,15 @@ function add_cost_function!(model, sys, tspan, pmap)
         set_objective!(model, 0)
         return
     end
+
+    # First resolve observed variables so that EvalAt evaluations like
+    # obs_var(1.0) or obs_var(tf) are expanded before model-var rules.
+    # Parameter rules are intentionally excluded: they would fold initial
+    # guesses (e.g. u(t) => 0.0) into the cost instead of letting
+    # model-var rules map them to solver variables (e.g. V[1](t)).
+    obs_rules = Dict{Any, Any}()
+    get_observed_substitution_rules!(obs_rules, sys; tspan)
+    jcosts = fixpoint_sub(jcosts, obs_rules; fold = Val(true), filterer = Returns(true))
 
     rules = Dict{Any, Any}()
     get_model_vars_substitution_rules!(rules, model, sys, tspan)
@@ -454,7 +499,7 @@ end
 
 function get_model_vars_substitution_rules!(rules::Dict{Any, Any}, model, sys, tspan)
     x_ops = [operation(unwrap(st)) for st in unknowns(sys)]
-    c_ops = [operation(unwrap(ct)) for ct in unbound_inputs(sys)]
+    c_ops = [operation(unwrap(ct)) for ct in inputs(sys)]
     t = get_iv(sys)
     merge!(rules, whole_t_map(model, t, x_ops, c_ops))
     (ti, tf) = tspan
@@ -467,9 +512,32 @@ function get_model_vars_substitution_rules!(rules::Dict{Any, Any}, model, sys, t
     return nothing
 end
 
-function get_observed_substitution_rules!(rules::Dict{Any, Any}, sys)
+function get_observed_substitution_rules!(rules::Dict{Any, Any}, sys; tspan = nothing)
     # add the substitution rules for the observed variables
-    merge!(rules, get_substitutions(sys))
+    subs = get_substitutions(sys)
+    merge!(rules, subs)
+    # Also add operator-level rules so that concrete time evaluations
+    # like obs_var(1.0) from EvalAt are substituted correctly.
+    # The operator lambda handles numeric time points (combine_fold can call it
+    # when all args are Const). For symbolic time points like tf, we add
+    # explicit rules since combine_fold won't call the lambda with symbolic args.
+    iv = get_iv(sys)
+    for (lhs, rhs) in subs
+        op = operation(unwrap(lhs))
+        haskey(rules, op) && continue
+        # filterer = Returns(true) is needed to recurse inside the (t) arguments
+        # of the observed expression;
+        # e.g. for obs_val = a*x(t) and a cost that has obs_val(1.0), we want to get a*x(1.0)
+        rules[op] = t -> substitute(rhs, Dict(iv => t); filterer = Returns(true))
+        # Add explicit rules for symbolic tspan endpoints (e.g. obs_val(tf))
+        if tspan !== nothing
+            for ti in tspan
+                symbolic_type(ti) === ScalarSymbolic() || continue
+                evaluated = substitute(rhs, Dict(iv => value(ti)); filterer = Returns(true))
+                rules[op(value(ti))] = evaluated
+            end
+        end
+    end
     return nothing
 end
 
@@ -519,11 +587,16 @@ function add_user_constraints!(model, sys, tspan, pmap)
 
     is_free_final(model) && check_constraint_vars(cons_dvs)
 
+    # First resolve observed variables so that EvalAt evaluations
+    # are expanded before model-var rules are applied.
+    obs_rules = Dict{Any, Any}()
+    get_observed_substitution_rules!(obs_rules, sys; tspan)
+    jconstraints = fixpoint_sub(jconstraints, obs_rules; fold = Val(true), filterer = Returns(true))
+
     rules = Dict{Any, Any}()
     get_toterm_substitution_rules!(rules, cons_dvs)
     get_model_vars_substitution_rules!(rules, model, sys, tspan)
     get_param_substitution_rules!(rules, pmap)
-    get_observed_substitution_rules!(rules, sys)
     # `fixpoint_sub` to recursively substitute into `toterm` rules
     jconstraints = fixpoint_sub(jconstraints, rules; fold = Val(true), filterer = Returns(true))
 

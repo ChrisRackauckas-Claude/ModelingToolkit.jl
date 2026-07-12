@@ -1,4 +1,5 @@
 using ModelingToolkitBase, OrdinaryDiffEq, StochasticDiffEq, JumpProcesses, Test
+using OrdinaryDiffEqRosenbrock
 using SciMLStructures: canonicalize, Discrete
 using ModelingToolkitBase: SymbolicContinuousCallback,
     SymbolicDiscreteCallback,
@@ -11,6 +12,7 @@ using StableRNGs
 import SciMLBase
 using SymbolicIndexingInterface
 using Setfield
+using LinearAlgebra
 rng = StableRNG(12345)
 
 function get_callback(prob)
@@ -377,10 +379,10 @@ end
 
     sol = solve(prob, Tsit5())
     sol_nosplit = solve(prob_nosplit, Tsit5())
-    @test 0 <= minimum(sol[x]) <= 1.0e-10 # the ball never went through the floor but got very close
+    @test 0 <= minimum(sol[abs(x)]) <= 1.0e-10 # the ball never went through the floor but got very close
     @test minimum(sol[y]) ≈ -1.5 # check wall conditions
     @test maximum(sol[y]) ≈ 1.5  # check wall conditions
-    @test 0 <= minimum(sol_nosplit[x]) <= 1.0e-10 # the ball never went through the floor but got very close
+    @test 0 <= minimum(sol_nosplit[abs(x)]) <= 1.0e-10 # the ball never went through the floor but got very close
     @test minimum(sol_nosplit[y]) ≈ -1.5 # check wall conditions
     @test maximum(sol_nosplit[y]) ≈ 1.5  # check wall conditions
 
@@ -625,7 +627,7 @@ end
     @discretes k(t)
     @variables A(t) B(t)
 
-    eqs = [MassActionJump(k, [A => 1], [A => -1])]
+    eqs = [SymbolicMassActionJump(k, [A => 1], [A => -1])]
     cond1 = (t == t1)
     affect1 = [A ~ Pre(A) + 1]
     cb1 = cond1 => affect1
@@ -978,9 +980,8 @@ if @isdefined(ModelingToolkit)
         # This is singular at the second event, but the derivatives are zero so it's
         # constant after that point anyway. Just make sure it hits the last event and
         # had the correct `u`.
-        @test_broken SciMLBase.successful_retcode(sol)
         @test sol.t[end] >= 120.0
-        @test sol[end] == [0.0, 0.0, 0.0]
+        @test sol[[sys.binary_valve_1.S, sys.binary_valve_2.Δp]][end] == [0.0, 0.0]
     end
 end
 
@@ -1602,7 +1603,7 @@ end
 if @isdefined(ModelingToolkit)
     @testset "Symbolic affects are compiled in `complete`" begin
         @parameters g
-        @variables x(t) [state_priority = 10.0] y(t) [guess = 1.0]
+        @variables x(t) [state_priority = 10] y(t) [guess = 1.0]
         @variables λ(t) [guess = 1.0]
         eqs = [
             D(D(x)) ~ λ * x
@@ -1830,5 +1831,111 @@ if !@isdefined(ModelingToolkit)
         @parameters p (f::Function)(..)
         @discretes d(t)
         @test isequal(Pre(2x^2 + 3sin(f(x)) - ifelse(p < 0, d, d + 2) + 2p), 2Pre(x)^2 + 3sin(f(Pre(x))) - ifelse(p < 0, Pre(d), Pre(d) + 2) + 2p)
+    end
+
+    @testset "Issue#4272: Scalarized array params in `AffectSystem`" begin
+        @variables u(t)
+        @variables (x(t))[1:2]
+        @variables y(t)
+
+        @parameters A[1:4]
+        @parameters b[1:2]
+        @parameters c[1:2]
+
+        eqs = [
+            u ~ x[1] + x[2] * sin(t)
+            D(x) ~ reshape(A, 2, 2) * x + b * u;
+            y ~ dot(c, x)
+        ]
+
+        event1 = SymbolicDiscreteCallback([1.0], [x[1] ~ 1.0]; iv = t)
+        @named sys = System(eqs, t, [u, x..., y], [A, b, c]; discrete_events = [event1])
+        @test_nowarn complete(sys)
+    end
+    @testset "Issue#4031, #4239: `AssignmentAffect`" begin
+        @variables x(t) y(t)
+        @discretes d(t)
+
+        aff = AssignmentAffect([y => y + 1, d => d + y + 1])
+        @test aff isa ModelingToolkitBase.SymbolicAffect
+        @test issetequal(aff.affect, [y ~ Pre(y) + 1, d ~ Pre(d) + Pre(y) + 1])
+        @test issetequal(aff.discrete_parameters, [d])
+
+        evt = [x ~ 1.0] => [y => y + 1, d => d + 5, x ~ 3Pre(x)]
+        @mtkcompile sys = System([D(x) ~ 1, D(y) ~ 2 + d], t; continuous_events = [evt])
+        prob = ODEProblem(sys, [x => 0, y => 0, d => 1], (0.0, 2.0))
+        sol = solve(prob, Tsit5())
+        @test sol(1 - eps(); idxs = [x, y, d]) ≈ [1.0, 3.0, 1.0]
+        @test all(sol(1.001; idxs = [x, y, d]) .>= [3.0, 4.0, 6.0])
+    end
+end
+
+if @isdefined(ModelingToolkit)
+    @testset "Issue#4259: Array variables and empty affects" begin
+        @component function MinimalBug(; name)
+            vars = @variables begin
+                s(t), [guess = 1.0]
+                arr(t)[1:2]
+            end
+            eqs = [
+                D(s) ~ 0.1
+                arr[1] ~ s
+                arr[2] ~ 2s
+            ]
+            continuous_events = [
+                [s ~ 0.5] => Symbolics.Equation[],
+            ]
+            System(eqs, t, [s; collect(arr)], []; name, continuous_events)
+        end
+
+        @named sys = MinimalBug()
+        @test_nowarn mtkcompile(sys)
+    end
+end
+
+if !@isdefined(ModelingToolkit)
+    @testset "`initialize_save_discretes` support" begin
+        @variables x(t)
+        @discretes d1(t) d2(t)
+        cevt = SymbolicContinuousCallback(
+            [x ~ 0.5], [d1 ~ Pre(d1) + 0.1]; discrete_parameters = [d1], initialize_save_discretes = false
+        )
+        devt = SymbolicDiscreteCallback(
+            0.1, [d2 ~ Pre(d2) + 0.1]; discrete_parameters = [d2], initialize_save_discretes = false
+        )
+        @mtkcompile sys = System(
+            [D(x) ~ sin(d1 * d2 * t)], t; continuous_events = [cevt], discrete_events = [devt]
+        )
+        prob = ODEProblem(sys, [x => 0.0, d1 => 1.0, d2 => 1.0], (0.0, 10.0))
+        sol = solve(prob, Tsit5())
+        @test sol.discretes[1].t[1] > 0.0
+        @test sol.discretes[2].t[1] > 0.0
+    end
+
+    @testset "`SciMLBase.Clock(dt; phase)` as `SymbolicDiscreteCallback` condition" begin
+        @variables x(t)
+        @discretes d(t)
+
+        @testset "Zero phase" begin
+            devt = SymbolicDiscreteCallback(
+                SciMLBase.Clock(0.1; phase = 0.0), [d ~ Pre(d) + 1]; discrete_parameters = [d],
+            )
+            @mtkcompile sys = System([D(x) ~ t], t, [x, d], []; discrete_events = [devt])
+            prob = ODEProblem(sys, [x => 0.0, d => 0.0], (0.0, 1.0))
+            sol = solve(prob, Tsit5())
+            # It shouldn't tick at `tspan[2]`
+            @test sol.discretes[1].t ≈ 0.0:0.1:0.999
+            @test sol[d] ≈ 1:10
+        end
+        @testset "Nonzero phase" begin
+            devt = SymbolicDiscreteCallback(
+                SciMLBase.Clock(0.1; phase = 0.05), [d ~ Pre(d) + 1]; discrete_parameters = [d],
+            )
+            @mtkcompile sys = System([D(x) ~ t], t, [x, d], []; discrete_events = [devt])
+            prob = ODEProblem(sys, [x => 0.0, d => 0.0], (0.0, 1.0))
+            sol = solve(prob, Tsit5())
+            @test sol.discretes[1].t ≈ 0.05:0.1:1.0
+            @test sol[d] ≈ 1:10
+        end
     end
 end

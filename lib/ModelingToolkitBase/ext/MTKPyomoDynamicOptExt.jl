@@ -5,8 +5,34 @@ using DiffEqBase
 using UnPack
 using NaNMath
 using Setfield
+using OrderedCollections: OrderedSet
+using Symbolics: SymbolicT, unwrap
 import SymbolicUtils as SU
 const MTK = ModelingToolkitBase
+
+function __init__()
+    # Workaround for Julia 1.10 compiler bug (Issue #4211)
+    # On Julia 1.10, loading this extension can cause collect_vars! to fail
+    # to properly call collect_var! until collect_var! has been called directly.
+    # This forces correct method compilation before user code runs.
+    if VERSION < v"1.11"
+        _force_collect_var_compilation()
+    end
+    return nothing
+end
+
+# Helper function to force collect_var! compilation on Julia 1.10.
+# This works around a method invalidation bug where the mutual recursion between
+# collect_vars! and collect_var! breaks after this extension loads.
+function _force_collect_var_compilation()
+    @variables _dummy_t
+    @parameters _dummy_p
+    @variables _dummy_x(_dummy_t) = _dummy_p
+    _us = OrderedSet{SymbolicT}()
+    _ps = OrderedSet{SymbolicT}()
+    MTK.collect_var!(_us, _ps, unwrap(_dummy_x), unwrap(_dummy_t); depth = 0)
+    return nothing
+end
 
 const SPECIAL_FUNCTIONS_DICT = Dict(
     [
@@ -57,11 +83,14 @@ struct PyomoDynamicOptProblem{uType, tType, isinplace, P, F, K} <:
     wrapped_model::PyomoDynamicOptModel
     kwargs::K
 
-    function PyomoDynamicOptProblem(f, u0, tspan, p, model, kwargs...)
+    function PyomoDynamicOptProblem(f, u0, tspan, p, model, kwargs)
         return new{
             typeof(u0), typeof(tspan), SciMLBase.isinplace(f, 5),
             typeof(p), typeof(f), typeof(kwargs),
         }(f, u0, tspan, p, model, kwargs)
+    end
+    function PyomoDynamicOptProblem(f, u0, tspan, p, model; kwargs...)
+        return PyomoDynamicOptProblem(f, u0, tspan, p, model, kwargs)
     end
 end
 
@@ -77,12 +106,13 @@ _getproperty(s, name::Val{fieldname}) where {fieldname} = getproperty(s, fieldna
 function MTK.PyomoDynamicOptProblem(
         sys::System, op, tspan;
         dt = nothing, steps = nothing, tune_parameters = false,
-        guesses = Dict(), kwargs...
+        guesses = Dict(),
+        bounds = Dict(), kwargs...
     )
     prob,
         pmap = MTK.process_DynamicOptProblem(
         PyomoDynamicOptProblem, PyomoDynamicOptModel,
-        sys, op, tspan; dt, steps, tune_parameters, guesses, kwargs...
+        sys, op, tspan; dt, steps, tune_parameters, guesses, bounds, kwargs...
     )
     conc_model = prob.wrapped_model.model
     MTK.add_equational_constraints!(prob.wrapped_model, sys, pmap, tspan)
@@ -145,6 +175,32 @@ function MTK.add_constraint!(pmodel::PyomoDynamicOptModel, cons; n_idxs = 1)
     else
         f = eval(Symbolics.build_function(expr, model_sym, dummy_sym))
         setproperty!(model, cons_sym, pyomo.Constraint(rule = Pyomo.pyfunc(f)))
+    end
+end
+
+function MTK.set_variable_bounds!(m::PyomoDynamicOptModel, sys, pmap, tf, tunable_params, user_bounds = Dict())
+    (; state_bounds, input_bounds, param_bounds, tf_bounds) = MTK.extract_variable_bounds(sys, pmap, tf, tunable_params, user_bounds)
+    t = MTK.get_iv(sys)
+    for (i, (lo, hi)) in state_bounds
+        var = MTK.lowered_var(m, :U, i, t)
+        MTK.add_constraint!(m, var ≳ lo)
+        MTK.add_constraint!(m, var ≲ hi)
+    end
+    for (i, (lo, hi)) in input_bounds
+        var = MTK.lowered_var(m, :V, i, t)
+        MTK.add_constraint!(m, var ≳ lo)
+        MTK.add_constraint!(m, var ≲ hi)
+    end
+    for (i, (lo, hi)) in param_bounds
+        P_sym = Symbolics.value(pysym_getproperty(m.model_sym, :P))
+        p_var = P_sym[i]
+        MTK.add_constraint!(m, p_var ≳ lo)
+        MTK.add_constraint!(m, p_var ≲ hi)
+    end
+    return if !isnothing(tf_bounds)
+        tₛ_sym = pysym_getproperty(m.model_sym, :tₛ)
+        MTK.add_constraint!(m, tₛ_sym ≳ tf_bounds[1])
+        MTK.add_constraint!(m, tₛ_sym ≲ tf_bounds[2])
     end
 end
 

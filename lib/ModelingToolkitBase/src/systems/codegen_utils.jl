@@ -1,3 +1,120 @@
+const _COMPILE_OPTIONS = Dict{Symbol, Int}(
+    :off => 0,
+    :on => 1,
+    :all => 2,
+    :min => 3,
+)
+
+"""
+    CompilerOptions(; optlevel = -1, compile = :default, infer = :default)
+
+Options controlling the Julia compiler for generated functions.
+
+Note that this feature is considered experimental.
+
+# Fields
+- `optlevel::Int`: LLVM optimization level (0-3), or -1 (default) to inherit from the module.
+- `compile::Int`: Compilation mode as an integer (0=off, 1=on, 2=all, 3=min), or -1 (default)
+  to inherit. Can also be specified as a symbol: `:off`, `:on`, `:all`, `:min`, or `:default`.
+- `infer::Int`: Type inference (0=off, 1=on), or -1 (default) to inherit. Can also be specified
+  as a Bool or `:default`.
+"""
+struct CompilerOptions
+    optlevel::Int
+    compile::Int
+    infer::Int
+end
+
+function CompilerOptions(;
+        optlevel::Int = -1, compile::Union{Int, Symbol} = :default,
+        infer::Union{Int, Bool, Symbol} = :default
+    )
+    _compile = if compile isa Symbol
+        compile === :default ? -1 : get(_COMPILE_OPTIONS, compile) do
+                throw(ArgumentError("Invalid compile option: $compile. Valid options: :default, :off, :on, :all, :min"))
+        end
+    else
+        compile
+    end
+    _infer = if infer isa Symbol
+        infer === :default ? -1 :
+            throw(ArgumentError("Invalid infer option: $infer. Valid options: :default, true, false"))
+    elseif infer isa Bool
+        Int(infer)
+    else
+        infer
+    end
+    return CompilerOptions(optlevel, _compile, _infer)
+end
+
+_has_options(co::CompilerOptions) = co.optlevel != -1 || co.compile != -1 || co.infer != -1
+
+const _COMPILER_OPTIONS_SUPPORTED = isdefined(Base.Experimental, :set_compile!)
+
+# Fallback modules with module-level compiler options for Julia versions
+# that don't support per-method compiler options (Base.Experimental.set_compile!).
+# We pre-create modules for the most common combinations:
+#   - optimize=0
+#   - optimize=1
+#   - optimize=0, infer=false
+# On Julia versions with per-method support, these modules are still defined
+# but without any special compiler options (they are never used in that case).
+module _EvalModuleOpt0
+    @static if !isdefined(Base.Experimental, :set_compile!)
+        Base.Experimental.@compiler_options optimize = 0
+        using RuntimeGeneratedFunctions
+        RuntimeGeneratedFunctions.init(@__MODULE__)
+    end
+end
+module _EvalModuleOpt1
+    @static if !isdefined(Base.Experimental, :set_compile!)
+        Base.Experimental.@compiler_options optimize = 1
+        using RuntimeGeneratedFunctions
+        RuntimeGeneratedFunctions.init(@__MODULE__)
+    end
+end
+module _EvalModuleOpt0NoInfer
+    @static if !isdefined(Base.Experimental, :set_compile!)
+        Base.Experimental.@compiler_options optimize = 0 infer = false
+        using RuntimeGeneratedFunctions
+        RuntimeGeneratedFunctions.init(@__MODULE__)
+    end
+end
+
+"""
+    _resolve_fallback_eval_module(co::CompilerOptions)
+
+Return a pre-made module with the appropriate module-level compiler options for the
+given `CompilerOptions`. This is used as a fallback on Julia versions that do not support
+per-method compiler options. Only a limited set of option combinations is supported;
+unsupported combinations will throw an error.
+"""
+function _resolve_fallback_eval_module(co::CompilerOptions)
+    if co.compile != -1
+        throw(
+            ArgumentError(
+                "Non-default `compile` compiler option is not supported on Julia $VERSION. " *
+                    "Per-method compiler options require Julia with `Base.Experimental.set_compile!` support."
+            )
+        )
+    end
+    if co.optlevel == 0 && co.infer == -1
+        return _EvalModuleOpt0
+    elseif co.optlevel == 1 && co.infer == -1
+        return _EvalModuleOpt1
+    elseif co.optlevel == 0 && co.infer == 0
+        return _EvalModuleOpt0NoInfer
+    else
+        throw(
+            ArgumentError(
+                "The compiler option combination (optlevel=$(co.optlevel), infer=$(co.infer)) " *
+                    "is not supported on Julia $VERSION without per-method compiler options. " *
+                    "Supported fallback combinations: (optlevel=0), (optlevel=1), (optlevel=0, infer=false)."
+            )
+        )
+    end
+end
+
 """
     $(TYPEDSIGNATURES)
 
@@ -8,8 +125,28 @@ Given a function expression `expr`, return a callable version of it.
   RuntimeGeneratedFunctions.jl.
 - `eval_module`: The module to `eval` the expression `expr` in. If `!eval_expression`,
   this is the cache and context module for the `RuntimeGeneratedFunction`.
+- `compiler_options`: A [`CompilerOptions`](@ref) controlling LLVM optimization level,
+  compilation mode, and type inference for the generated function.
 """
-function eval_or_rgf(expr::Expr; eval_expression = false, eval_module = @__MODULE__)
+function eval_or_rgf(
+        expr::Expr; eval_expression = false, eval_module = @__MODULE__,
+        compiler_options::CompilerOptions = CompilerOptions()
+    )
+    if _has_options(compiler_options)
+        if _COMPILER_OPTIONS_SUPPORTED
+            expr = _inject_compiler_options_meta(expr, compiler_options)
+        else
+            if eval_module !== @__MODULE__
+                throw(
+                    ArgumentError(
+                        "Cannot use both a non-default `eval_module` and non-default `compiler_options` " *
+                            "on Julia $VERSION. Per-method compiler options require `Base.Experimental.set_compile!` support."
+                    )
+                )
+            end
+            eval_module = _resolve_fallback_eval_module(compiler_options)
+        end
+    end
     if eval_expression
         return eval_module.eval(expr)
     else
@@ -19,6 +156,23 @@ end
 
 eval_or_rgf(::Nothing; kws...) = nothing
 
+function _inject_compiler_options_meta(expr::Expr, co::CompilerOptions)
+    if expr.head === :function || expr.head === :->
+        body = expr.args[2]
+        metas = Expr[]
+        co.optlevel != -1 && push!(metas, Expr(:meta, Expr(:optlevel, co.optlevel)))
+        co.compile != -1 && push!(metas, Expr(:meta, Expr(:compile, co.compile)))
+        co.infer != -1 && push!(metas, Expr(:meta, Expr(:infer, co.infer)))
+        if body isa Expr && body.head === :block
+            new_body = Expr(:block, metas..., body.args...)
+        else
+            new_body = Expr(:block, metas..., body)
+        end
+        return Expr(expr.head, expr.args[1], new_body)
+    end
+    return expr
+end
+
 """
     $(TYPEDSIGNATURES)
 
@@ -26,6 +180,105 @@ Return the name for the `i`th argument in a function generated by `build_functio
 """
 function generated_argument_name(i::Int)
     return Symbol(:__mtk_arg_, i)
+end
+
+function compute_array_variable_buffer_idxs(@nospecialize(args); ignore_vars = Set{SymbolicT}(), ignore_arg_idxs = nothing)
+    return _compute_array_variable_buffer_idxs(args isa Vector ? args : collect(args), ignore_vars, ignore_arg_idxs)
+end
+
+function _compute_array_variable_buffer_idxs(args::Vector, ignore_vars, ignore_arg_idxs = nothing)
+    # map array symbolic to an identically sized array where each element is (buffer_idx, idx_in_buffer)
+    var_to_arridxs = Dict{SymbolicT, Vector{Tuple{Int, Int}}}()
+    for (i, arg) in enumerate(args)
+        # filter out non-arrays
+        # any element of args which is not an array is assumed to not contain a
+        # scalarized array symbolic. This works because the only non-array element
+        # is the independent variable
+        arg isa Vector{SymbolicT} || continue
+        # entire arg-vectors whose decomposition is already accounted for (e.g. the
+        # parameter slice, handled via the cached `param_var_to_arridxs`) are skipped
+        # here so we never re-run `split_indexed_var`/`get_stable_index` on them.
+        ignore_arg_idxs === nothing || i in ignore_arg_idxs && continue
+
+        # go through symbolics
+        for (j, var) in enumerate(arg)
+            var = unwrap(var)
+            # filter out non-array-symbolics
+            arrvar, isarr = split_indexed_var(var)
+            isarr || continue
+            arrvar in ignore_vars && continue
+            # get and/or construct the buffer storing indexes
+            idxbuffer = get(var_to_arridxs, arrvar, nothing)
+            if idxbuffer === nothing
+                idxbuffer = map(Returns((0, 0)), SU.stable_eachindex(arrvar))
+            end
+            idxbuffer[SU.as_linear_idx(SU.shape(arrvar), get_stable_index(var))] = (i, j)
+            var_to_arridxs[arrvar] = idxbuffer
+        end
+    end
+
+    return var_to_arridxs
+end
+
+function array_variable_buffer_idxs_to_assignments(
+        var_to_arridxs::Dict{SymbolicT, Vector{Tuple{Int, Int}}};
+        argument_name = generated_argument_name, buffer_offset = 0,
+        filter_vars = nothing,
+    )
+    assignments = Assignment[]
+    for (arrvar, idxs) in var_to_arridxs
+        filter_vars === nothing || arrvar in filter_vars || continue
+        # all elements of the array need to be present in `args` to form the
+        # reconstructing assignment
+        any(iszero ∘ first, idxs) && continue
+
+        var_size_expr = Expr(:tuple)
+        sharrvar = SU.shape(arrvar)
+        for ax in sharrvar
+            push!(var_size_expr.args, length(ax))
+        end
+
+        # if they are all in the same buffer, we can take a shortcut and `view` into it
+        if allequal(Iterators.map(first, idxs))
+            buffer_idx = first(first(idxs)) + buffer_offset
+            idxs = map(last, idxs)
+            shape = SU.ShapeVecT((1:length(idxs),))
+            # if all the elements are contiguous and ordered, turn the array of indexes into a range
+            # to help reduce allocations
+            if first(idxs) < last(idxs) && vec(idxs) == first(idxs):last(idxs)
+                expr = Expr(:call, view, argument_name(buffer_idx), first(idxs):last(idxs))
+            elseif vec(idxs) == first(idxs):-1:last(idxs)
+                expr = Expr(:call, view, argument_name(buffer_idx), first(idxs):-1:last(idxs))
+            elseif length(idxs) <= 16
+                expr = Expr(:call, SVector)
+                append!(expr.args, idxs)
+                expr = Expr(:call, view, argument_name(buffer_idx), expr)
+            else
+                expr = Expr(:call, view, argument_name(buffer_idx), idxs)
+            end
+        else
+            if length(idxs) <= 16
+                expr = Expr(:call, SVector)
+            else
+                expr = Expr(:vect)
+            end
+            for idx in idxs
+                i, j = idx
+                push!(expr.args, Expr(:ref, argument_name(i), j))
+            end
+        end
+        expr = Expr(:call, reshape, expr, var_size_expr)
+        if any(!isone ∘ first, sharrvar)
+            expr_origin = Expr(:call, Origin)
+            for ax in sharrvar
+                push!(expr_origin.args, first(ax))
+            end
+            expr = Expr(:call, expr_origin, expr)
+        end
+        push!(assignments, Assignment(arrvar, expr))
+    end
+
+    return assignments
 end
 
 """
@@ -40,75 +293,12 @@ reconstruct array variables if they are present scalarized in `args`.
   an argument to the generated function and returns the name of the argument in the
   generated function.
 """
-function array_variable_assignments(args...; argument_name = generated_argument_name)
-    # map array symbolic to an identically sized array where each element is (buffer_idx, idx_in_buffer)
-    var_to_arridxs = Dict{SymbolicT, Vector{Tuple{Int, Int}}}()
-    for (i, arg) in enumerate(args)
-        # filter out non-arrays
-        # any element of args which is not an array is assumed to not contain a
-        # scalarized array symbolic. This works because the only non-array element
-        # is the independent variable
-        symbolic_type(arg) == NotSymbolic() || continue
-        arg isa AbstractArray || continue
-
-        # go through symbolics
-        for (j, var) in enumerate(arg)
-            var = unwrap(var)
-            # filter out non-array-symbolics
-            arrvar, isarr = split_indexed_var(var)
-            isarr || continue
-            # get and/or construct the buffer storing indexes
-            idxbuffer = get!(
-                () -> map(Returns((0, 0)), SU.stable_eachindex(arrvar)), var_to_arridxs, arrvar
-            )
-            idxbuffer[SU.as_linear_idx(SU.shape(arrvar), get_stable_index(var))] = (i, j)
-        end
-    end
-
-    assignments = Assignment[]
-    for (arrvar, idxs) in var_to_arridxs
-        # all elements of the array need to be present in `args` to form the
-        # reconstructing assignment
-        any(iszero ∘ first, idxs) && continue
-
-        # if they are all in the same buffer, we can take a shortcut and `view` into it
-        if allequal(Iterators.map(first, idxs))
-            buffer_idx = first(first(idxs))
-            idxs = map(last, idxs)
-            # if all the elements are contiguous and ordered, turn the array of indexes into a range
-            # to help reduce allocations
-            if first(idxs) < last(idxs) && vec(idxs) == first(idxs):last(idxs)
-                idxs = first(idxs):last(idxs)
-            elseif vec(idxs) == first(idxs):-1:last(idxs)
-                idxs = first(idxs):-1:last(idxs)
-            else
-                # Otherwise, turn the indexes into an `SArray` so they're stack-allocated
-                idxs = SArray{Tuple{size(idxs)...}}(idxs)
-            end
-            # view and reshape
-
-            expr = term(
-                reshape, term(view, argument_name(buffer_idx), idxs),
-                size(arrvar)
-            )
-        else
-            elems = map(idxs) do idx
-                i, j = idx
-                term(getindex, argument_name(i), j; type = Real, shape = SU.ShapeVecT())
-            end
-            # use `MakeArray` syntax and generate a stack-allocated array
-            expr = term(
-                SymbolicUtils.Code.create_array, SArray, nothing,
-                Val(ndims(arrvar)), Val(length(arrvar)), elems...
-            )
-        end
-        if any(x -> !isone(first(x)), axes(arrvar))
-            expr = term(Origin(first.(axes(arrvar))...), expr)
-        end
-        push!(assignments, arrvar ← expr)
-    end
-
-    return assignments
+function array_variable_assignments(
+        @nospecialize(args...); ignore_vars = Set{SymbolicT}(), filter_vars = nothing,
+        argument_name = generated_argument_name, buffer_offset = 0, ignore_arg_idxs = nothing
+    )
+    var_to_arridxs = compute_array_variable_buffer_idxs(args; ignore_vars, ignore_arg_idxs)
+    return array_variable_buffer_idxs_to_assignments(var_to_arridxs; argument_name, buffer_offset, filter_vars)
 end
 
 """
@@ -141,6 +331,8 @@ The argument of generated functions corresponding to the history function.
 """
 const DDE_HISTORY_FUN = SSym(:___history___; type = SU.FnType{Tuple{Any, <:Real}, Vector{Real}, Nothing}, shape = SU.Unknown(1))
 const BVP_SOLUTION = SSym(:__sol__; type = Symbolics.FnType{Tuple{<:Real}, Vector{Real}, Nothing}, shape = SU.Unknown(1))
+const DDE_AT_IDX_SYM = SSym(:__delayvar_idxₘₜₖ; type = Int, shape = UnitRange{Int}[])
+const DDE_DELAY_SYM = SSym(:__delayxₘₜₖ; type = Real, shape = UnitRange{Int}[])
 
 """
     $(TYPEDSIGNATURES)
@@ -201,6 +393,18 @@ function __search_dervars_recurse(x::SymbolicT)
     end
 end
 
+struct ParameterArrayAssignments
+    var_to_arridxs::Dict{SymbolicT, Vector{Tuple{Int, Int}}}
+end
+
+function should_invalidate_mutable_cache_entry(::Type{ParameterArrayAssignments}, patch::NamedTuple)
+    return haskey(patch, :ps)
+end
+
+function find_arrvars_is_atomic(ex::SymbolicT)
+    return SU.default_is_atomic(ex) && Symbolics.isarraysymbolic(ex)
+end
+
 """
     $(TYPEDSIGNATURES)
 
@@ -214,6 +418,15 @@ generated functions, and `args` are the arguments.
   `MTKParameters` object are present. These are collapsed into a single argument and
   destructured inside the function. `p_start` must also be provided for non-split systems
   since it is used by `wrap_delays`.
+- `u_arg`: The index in `args` of the argument corresponding to `unknowns(sys)` (the `u`
+  vector). If `-1` (the default), the u vector is not treated specially. Otherwise, the
+  argument must be a `Vector` and is wrapped in a `DestructuredArgs` with the common
+  identifier `MTKUNKNOWNS_ARG`, giving it the predictable name `___mtkunknowns___`.
+- `compress_args`: A list of argument ranges that end before `p_start`.
+  Each range will be compressed into a single argument to the function. For example,
+  If there are 5 elements in `args` and `compress_args = [2:3]`, then the generated function
+  will take 4 arguments, where the second should be an indexable collection of the second
+  and third elements in `args`.
 - `wrap_delays`: Whether to transform delayed unknowns of `sys` present in `expr` into
   calls to a history function. The history function is added to the list of arguments
   right before parameters, at the index `p_start`.
@@ -224,8 +437,8 @@ generated functions, and `args` are the arguments.
 - `wrap_code`: Forwarded to `build_function`.
 - `add_observed`: Whether to add assignment statements for observed equations in the
   generated code.
-- `filter_observed`: A predicate function to filter out observed equations which should
-  not be added to the generated code.
+- `obsidxs_to_use`: An iterable of `Int` of the specific observed equations to use in this
+  function. This elides automatic observed detection.
 - `create_bindings`: Whether to explicitly destructure arrays of symbolics present in
   `args` in the generated code. If `false`, all usages of the individual symbolics will
   instead call `getindex` on the relevant argument. This is useful if the generated
@@ -248,90 +461,135 @@ All other keyword arguments are forwarded to `build_function`.
 """
 Base.@nospecializeinfer function build_function_wrapper(
         sys::AbstractSystem, @nospecialize(expr), @nospecialize(args...); p_start = 2,
-        p_end = is_time_dependent(sys) ? length(args) - 1 : length(args),
+        p_end = is_time_dependent(sys) ? length(args) - 1 : length(args), compress_args = UnitRange{Int}[],
+        non_standard_param_layout = false, u_arg::Integer = -1,
         wrap_delays = is_dde(sys), histfn = DDE_HISTORY_FUN, histfn_symbolic = histfn, wrap_code = identity,
-        add_observed = true, filter_observed = Returns(true),
-        create_bindings = false, output_type = nothing, mkarray = nothing,
+        add_observed = true, obsidxs_to_use = nothing,
+        create_bindings = false, @nospecialize(output_type::Union{Nothing, Type} = nothing), mkarray = nothing,
         wrap_mtkparameters = true, extra_assignments = Assignment[], cse = true,
-        optimize = nothing, kwargs...
+        n_param_buffers::Int = -1, optimize = nothing, @nospecialize(kwargs...)
     )
     isscalar = !(expr isa AbstractArray || symbolic_type(expr) == ArraySymbolic())
-    # filter observed equations
-    obs = filter(filter_observed, observed(sys))
+    obs = observed(sys)
+    args = Vector{Any}(collect(args))
+    assignments = Assignment[]
+
+    if u_arg != -1
+        args[u_arg] isa AbstractVector ||
+            throw(ArgumentError("argument at u_arg = $u_arg must be a Vector, got $(typeof(args[u_arg]))"))
+    end
+
+    u_argument_name = if u_arg == -1
+        generated_argument_name
+    else
+        push!(assignments, Assignment(generated_argument_name(u_arg), :___mtkunknowns___))
+        i -> i == u_arg ? :___mtkunknowns___ : generated_argument_name(i)
+    end
     # turn delayed unknowns into calls to the history function
     if wrap_delays
         param_arg = is_split(sys) ? MTKPARAMETERS_ARG : generated_argument_name(p_start)
-        obs = map(obs) do eq
-            delay_to_function(sys, eq; param_arg, histfn)
+        delayfn_expr = STerm(
+            Base.Fix1, SArgsT((histfn_symbolic, param_arg));
+            type = SU.FnType{Tuple, Vector{Real}, Any}, shape = SU.Unknown(1)
+        )
+        for (i, var) in enumerate(unknowns(sys))
+            Moshi.Match.@match var begin
+                BSImpl.Term(; f) && if f isa SymbolicT end => begin
+                    rhs = STerm(
+                        ComposedFunction, SArgsT((Base.Fix2(getindex, i), delayfn_expr));
+                        type = SU.FnType{Tuple, Real, Any}, shape = UnitRange{Int}[]
+                    )
+                    push!(assignments, Assignment(f, rhs))
+                end
+                _ => nothing
+            end
         end
-        expr = delay_to_function(sys, expr; param_arg, histfn)
+
         # add extra argument
-        args = (args[1:(p_start - 1)]..., histfn_symbolic, args[p_start:end]...)
+        insert!(args, p_start, histfn_symbolic)
         p_start += 1
         p_end += 1
     end
 
-    dervars = Dict{SymbolicT, SymbolicT}()
-    dervars_in_expr = Set{SymbolicT}()
-    if isscheduled(sys)
-        sched::Schedule = get_schedule(sys)
-        for (k, v) in sched.dummy_sub
-            ttk = default_toterm(k)
-            isequal(ttk, v) && continue
-            dervars[default_toterm(k)] = v
-        end
-    else
-        for eq in equations(sys)
-            isdiffeq(eq) || continue
-            ttk = default_toterm(eq.lhs)
-            isequal(ttk, eq.rhs) && continue
-            dervars[ttk] = eq.rhs
-        end
-    end
-    Symbolics.get_variables!(dervars_in_expr, expr, keys(dervars); recurse = __search_dervars_recurse)
-    # only get the necessary observed equations, avoiding extra computation
-    if add_observed && !isempty(obs)
-        obsidxs = BitSet(observed_equations_used_by(sys, expr; obs))
-    else
-        obsidxs = BitSet()
-    end
-    # similarly for parameter dependency equations
-    reqd_bound_pars = OrderedSet{SymbolicT}()
-    bgraph::ParameterBindingsGraph = if iscomplete(sys)
-        get_parameter_bindings_graph(sys)
-    else
-        ParameterBindingsGraph(sys)
+    ir_info = get_ir_info(sys)
+    ir = get_irstructure(sys)
+    expr = ir_info.obs_subber(expr)
+    stmts = SU.IRStructureSearchBuffer(ir, Set{SymbolicT}())
+    SU.search_variables!(stmts, expr; is_atomic = Returns(true))
+    for subexpr in stmts
+        SU.populate_ir!(ir, subexpr)
     end
 
-    bound_parameters_used_by!(reqd_bound_pars, sys, expr; bgraph)
-    for i in obsidxs
-        bound_parameters_used_by!(reqd_bound_pars, sys, obs[i].rhs; bgraph)
-    end
-    for dervar in dervars_in_expr
-        bound_parameters_used_by!(reqd_bound_pars, sys, dervars[dervar]; bgraph)
-        union!(obsidxs, observed_equations_used_by(sys, dervars[dervar]; obs))
-    end
-    sort_bound_parameters!(reqd_bound_pars, sys; bgraph)
+    # Subset the `IRStructure` so that optimization passes run on the minimal set of
+    # expressions
+    ir = SU.subset_ir(ir, stmts)
+    # We don't use `replace_node!` here to insert the observed, and instead prefer to
+    # substitute as done above. The issue arises due to array variables passed scalarized
+    # to the function. Consider a case where `p1` and `p2` are array parameters, `p1 => p2`
+    # is a binding, and `p2` is passed scalarized to the function. Codegen for `Func` adds
+    # `p2[1] => Symbol("...")` to `rewrites`, expecting that `SU.Code.codegen_ir!` checks
+    # this and doesn't actually try to codegen the `getindex`. However, if an expression
+    # has `p1[1]`, then `replace_node!(ir, p1, p2)` won't update this expression. As a result,
+    # when codegen hits `p1[1]`, it won't use the replacement and codegen the `getindex`, which
+    # generates `p2[1]`. `p2` unscalarized is not defined because `array_variable_assignments`
+    # doesn't find it in the expression. Thus, where codegen should generate something like
+    # `var"##cse#1234" = __mtk_arg_2[13]`, it will generate
+    # ```julia
+    # var"##cse#1234" = var"p2"
+    # var"##cse#1235" = var"##cse#1234"[1]
+    # ```
+
+    required_arrvars = Set{SymbolicT}()
+    search_buffer = SU.IRStructureSearchBuffer(ir, required_arrvars)
+    SU.search_variables!(search_buffer, expr; is_atomic = find_arrvars_is_atomic, recurse = !SU.default_is_atomic)
+
     # assignments for reconstructing scalarized array symbolics
-    assignments = array_variable_assignments(args...)
-    binds = bindings(sys)
-    for p in reqd_bound_pars
-        push!(assignments, p ← binds[p])
-    end
-    obsidxs = collect(obsidxs)
-    for eq in obs[obsidxs]
-        push!(assignments, eq.lhs ← eq.rhs)
-    end
-
-    for dervar in dervars_in_expr
-        push!(assignments, dervar ← dervars[dervar])
+    if non_standard_param_layout
+        append!(assignments, array_variable_assignments(args...; filter_vars = required_arrvars, argument_name = u_argument_name))
+    else
+        # `n_param_buffers` marks the boundary between the `reorder_parameters` buffers and
+        # any `cachesyms` the caller appended to the parameter slice (cachesyms are always a
+        # suffix). When it is `-1` (unspecified) the whole slice is parameters (no cachesym
+        # tail). The cache always stores the PARAM-ONLY decomposition (shared, propagated to
+        # SCC subsystems); the per-call cachesym tail is decomposed fresh and merged below.
+        pbuf_end = n_param_buffers == -1 ? p_end : (p_start + n_param_buffers - 1)
+        cached = check_mutable_cache(sys, ParameterArrayAssignments, ParameterArrayAssignments, nothing)
+        if cached isa ParameterArrayAssignments
+            param_var_to_arridxs = cached.var_to_arridxs
+        else
+            param_var_to_arridxs = compute_array_variable_buffer_idxs(args[p_start:pbuf_end])
+            store_to_mutable_cache!(sys, ParameterArrayAssignments, ParameterArrayAssignments(param_var_to_arridxs))
+        end
+        # Merge the cachesym tail, shifting its slice-relative buffer indices past the
+        # parameter buffers. cachesyms are prior-SCC unknowns / CSE temporaries -- never array
+        # parameters -- so their array-variable keyset is disjoint from the params'. The
+        # merged dict is identical to decomposing the whole `args[p_start:p_end]` slice.
+        if pbuf_end < p_end
+            merged = copy(param_var_to_arridxs)
+            tail = compute_array_variable_buffer_idxs(
+                args[(pbuf_end + 1):p_end]; ignore_vars = keys(merged)
+            )
+            shift = pbuf_end - p_start + 1
+            for (arrvar, idxs) in tail
+                merged[arrvar] = [(i + shift, j) for (i, j) in idxs]
+            end
+            param_var_to_arridxs = merged
+        end
+        append!(
+            assignments, array_variable_buffer_idxs_to_assignments(
+                param_var_to_arridxs; buffer_offset = p_start - 1, filter_vars = required_arrvars
+            )
+        )
+        other_assigns = array_variable_assignments(args...; ignore_vars = keys(param_var_to_arridxs), filter_vars = required_arrvars, argument_name = u_argument_name, ignore_arg_idxs = p_start:p_end)
+        append!(assignments, other_assigns)
     end
     append!(assignments, extra_assignments)
 
-    args = ntuple(Val(length(args))) do i
-        arg = args[i]
+    for (i, arg) in enumerate(args)
         # Make sure to use the proper names for arguments
-        if symbolic_type(arg) == NotSymbolic() && arg isa AbstractArray
+        args[i] = if u_arg != -1 && i == u_arg
+            DestructuredArgs(arg, MTKUNKNOWNS_ARG; create_bindings)
+        elseif symbolic_type(arg) == NotSymbolic() && arg isa AbstractArray
             DestructuredArgs(arg, generated_argument_name(i); create_bindings)
         else
             arg
@@ -342,15 +600,19 @@ Base.@nospecializeinfer function build_function_wrapper(
     if is_split(sys) && wrap_mtkparameters
         if p_start > p_end
             # In case there are no parameter buffers, still insert an argument
-            args = (args[1:(p_start - 1)]..., MTKPARAMETERS_ARG, args[(p_end + 1):end]...)
+            args = [args[1:(p_start - 1)]; MTKPARAMETERS_ARG; args[(p_end + 1):end]]
         else
             # cannot apply `create_bindings` here since it doesn't nest
-            args = (
-                args[1:(p_start - 1)]...,
-                DestructuredArgs(collect(args[p_start:p_end]), MTKPARAMETERS_ARG),
-                args[(p_end + 1):end]...,
-            )
+            args = [args[1:(p_start - 1)]; DestructuredArgs(collect(args[p_start:p_end]), MTKPARAMETERS_ARG); args[(p_end + 1):end]]
         end
+    end
+
+    sort!(compress_args; by = first)
+    reverse!(compress_args)
+    for (i, range) in enumerate(compress_args)
+        compressed = DestructuredArgs(args[range], Symbol(:__compressed, i))
+        deleteat!(args, range)
+        insert!(args, first(range), compressed)
     end
 
     # add preface assignments
@@ -358,27 +620,20 @@ Base.@nospecializeinfer function build_function_wrapper(
         append!(assignments, pref)
     end
 
-    wrap_code = wrap_code .∘ wrap_assignments(isscalar, assignments)
+    wrap_code = wrap_code .∘ wrap_assignments(false, assignments)
 
     # handling of `output_type` and `mkarray`
     similarto = nothing
     if output_type === Tuple
         expr = MakeTuple(Tuple(expr))
-        wrap_code = wrap_code[1]
     elseif mkarray === nothing
         similarto = output_type
     else
         expr = mkarray(expr, output_type)
-        wrap_code = wrap_code[2]
-    end
-
-    # scalar `build_function` only accepts a single function for `wrap_code`.
-    if wrap_code isa Tuple && symbolic_type(expr) == ScalarSymbolic()
-        wrap_code = wrap_code[1]
     end
 
     optimize = resolve_optimize_option(optimize)
-    return build_function(expr, args...; wrap_code, similarto, cse, optimize, kwargs...)
+    return Symbolics.codegen_function(ir, expr, args; wrap_code, similarto, cse, optimize, kwargs...)
 end
 
 resolve_optimize_option(x) = x
@@ -406,12 +661,23 @@ function GeneratedFunctionWrapper{P}(::Type{Val{true}}, foop, fiip; kwargs...) w
     return :($(GeneratedFunctionWrapper{P})($foop, $fiip))
 end
 
-function GeneratedFunctionWrapper{P}(::Type{Val{false}}, foop, fiip; kws...) where {P}
-    return GeneratedFunctionWrapper{P}(eval_or_rgf(foop; kws...), eval_or_rgf(fiip; kws...))
+function GeneratedFunctionWrapper{P}(
+        ::Type{Val{false}}, foop, fiip;
+        compiler_options::CompilerOptions = CompilerOptions(), kws...
+    ) where {P}
+    return GeneratedFunctionWrapper{P}(
+        eval_or_rgf(foop; compiler_options, kws...),
+        eval_or_rgf(fiip; compiler_options, kws...)
+    )
 end
 
 function (gfw::GeneratedFunctionWrapper)(args...)
     return _generated_call(gfw, args...)
+end
+
+function SciMLBase.numargs(::GeneratedFunctionWrapper{P}) where {P}
+    n_oop = P[2]
+    return (n_oop, n_oop + 1)
 end
 
 @generated function _generated_call(gfw::GeneratedFunctionWrapper{P}, args...) where {P}
@@ -455,39 +721,50 @@ Optionally compile a method and optionally wrap it in a `GeneratedFunctionWrappe
 basis of `expression` `wrap_gfw`, both of type `Union{Type{Val{true}}, Type{Val{false}}}`.
 `gfw_args` is the first type parameter of `GeneratedFunctionWrapper`. `f` is a tuple of
 function expressions of the form `(oop, iip)` or a single out-of-place function expression.
-Keyword arguments are forwarded to `eval_or_rgf`.
+
+# Keyword Arguments
+
+- `compiler_options`: A [`CompilerOptions`](@ref) controlling LLVM optimization level,
+  compilation mode, and type inference for the generated function.
+
+All other keyword arguments are forwarded to `eval_or_rgf`.
 """
 function maybe_compile_function(
         expression, wrap_gfw::Type{Val{true}},
-        gfw_args::Tuple{Int, Int, Bool}, f::NTuple{2, Expr}; kwargs...
+        gfw_args::Tuple{Int, Int, Bool}, f::NTuple{2, Expr};
+        compiler_options::CompilerOptions = CompilerOptions(), kwargs...
     )
-    return GeneratedFunctionWrapper{gfw_args}(expression, f...; kwargs...)
+    return GeneratedFunctionWrapper{gfw_args}(expression, f...; compiler_options, kwargs...)
 end
 
 function maybe_compile_function(
         expression::Type{Val{false}}, wrap_gfw::Type{Val{false}},
-        gfw_args::Tuple{Int, Int, Bool}, f::NTuple{2, Expr}; kwargs...
+        gfw_args::Tuple{Int, Int, Bool}, f::NTuple{2, Expr};
+        compiler_options::CompilerOptions = CompilerOptions(), kwargs...
     )
-    return eval_or_rgf.(f; kwargs...)
+    return eval_or_rgf.(f; compiler_options, kwargs...)
 end
 
 function maybe_compile_function(
         expression::Type{Val{true}}, wrap_gfw::Type{Val{false}},
-        gfw_args::Tuple{Int, Int, Bool}, f::Union{Expr, NTuple{2, Expr}}; kwargs...
+        gfw_args::Tuple{Int, Int, Bool}, f::Union{Expr, NTuple{2, Expr}};
+        compiler_options::CompilerOptions = CompilerOptions(), kwargs...
     )
     return f
 end
 
 function maybe_compile_function(
         expression, wrap_gfw::Type{Val{true}},
-        gfw_args::Tuple{Int, Int, Bool}, f::Expr; kwargs...
+        gfw_args::Tuple{Int, Int, Bool}, f::Expr;
+        compiler_options::CompilerOptions = CompilerOptions(), kwargs...
     )
-    return GeneratedFunctionWrapper{gfw_args}(expression, f, nothing; kwargs...)
+    return GeneratedFunctionWrapper{gfw_args}(expression, f, nothing; compiler_options, kwargs...)
 end
 
 function maybe_compile_function(
         expression::Type{Val{false}}, wrap_gfw::Type{Val{false}},
-        gfw_args::Tuple{Int, Int, Bool}, f::Expr; kwargs...
+        gfw_args::Tuple{Int, Int, Bool}, f::Expr;
+        compiler_options::CompilerOptions = CompilerOptions(), kwargs...
     )
-    return eval_or_rgf(f; kwargs...)
+    return eval_or_rgf(f; compiler_options, kwargs...)
 end

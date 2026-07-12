@@ -2,10 +2,31 @@ using SafeTestsets, Pkg, Test
 # https://github.com/JuliaLang/julia/issues/54664
 import REPL
 
-const GROUP = get(ENV, "GROUP", "All")
+# The centralized SciML sublibrary CI (SublibraryCI.yml -> sublibrary-tests.yml@v1)
+# emits GROUP="ModelingToolkitBase" for the [Core] section and
+# GROUP="ModelingToolkitBase_<Section>" for every other section in test_groups.toml.
+# Strip that "<pkg>_" prefix so the bare section names below ("InterfaceI", "QA", …)
+# drive the dispatch. A bare "<pkg>" maps to "Core"; anything else (e.g. "All" for
+# local runs) is passed through unchanged.
+const _G = get(ENV, "GROUP", "All")
+const _SUB = "ModelingToolkitBase"
+const GROUP = _G == _SUB ? "Core" :
+    (startswith(_G, _SUB * "_") ? _G[(length(_SUB) + 2):end] : _G)
 
 function activate_extensions_env()
     Pkg.activate("extensions")
+    Pkg.develop([PackageSpec(path = dirname(@__DIR__))])
+    return Pkg.instantiate()
+end
+
+function activate_optimization_env()
+    Pkg.activate("optimization")
+    Pkg.develop([PackageSpec(path = dirname(@__DIR__))])
+    return Pkg.instantiate()
+end
+
+function activate_qa_env()
+    Pkg.activate("qa")
     Pkg.develop([PackageSpec(path = dirname(@__DIR__))])
     return Pkg.instantiate()
 end
@@ -26,6 +47,8 @@ end
             @safetestset "Variable binding semantics" include("binding_semantics.jl")
             @safetestset "Input Output Test" include("input_output_handling.jl")
             @safetestset "System Building Tests" include("system_building.jl")
+            @safetestset "Simple `mtkcompile`" include("simple_mtkcompile.jl")
+            @safetestset "`@mtkcomplete`" include("mtkcomplete.jl")
             @safetestset "ODESystem Test" include("odesystem.jl")
             @safetestset "Dynamic Quantities Test" include("dq_units.jl")
             @safetestset "Mass Matrix Test" include("mass_matrix.jl")
@@ -64,13 +87,15 @@ end
             @safetestset "IndexCache Test" include("index_cache.jl")
             @safetestset "Variable Utils Test" include("variable_utils.jl")
             @safetestset "Variable Metadata Test" include("test_variable_metadata.jl")
-            @safetestset "OptimizationSystem Test" include("optimizationsystem.jl")
             @safetestset "Discrete System" include("discrete_system.jl")
             @safetestset "Implicit Discrete System" include("implicit_discrete_system.jl")
             @safetestset "SteadyStateSystem Test" include("steadystatesystems.jl")
             @safetestset "SDESystem Test" include("sdesystem.jl")
             @safetestset "DDESystem Test" include("dde.jl")
             @safetestset "NonlinearSystem Test" include("nonlinearsystem.jl")
+            @safetestset "Homotopy lowering" include("homotopy_lowering.jl")
+            @safetestset "Homotopy problem construction & sweep" include("homotopy_problem.jl")
+            @safetestset "Homotopy OMC parity" include("homotopy_omc_parity.jl")
             @safetestset "PDE Construction Test" include("pdesystem.jl")
             @safetestset "JumpSystem Test" include("jumpsystem.jl")
             @safetestset "Poissonians Test" include("poissonians.jl")
@@ -95,6 +120,7 @@ end
         @safetestset "Test Big System Usage" include("bigsystem.jl")
         println("C compilation test requires gcc available in the path!")
         @safetestset "C Compilation Test" include("ccompile.jl")
+        @safetestset "Multithreading test" include("multithreading.jl")
         @testset "Distributed Test" include("distributed.jl")
         @testset "Serialization" include("serialization.jl")
     end
@@ -108,8 +134,19 @@ end
         @safetestset "HomotopyContinuation Extension Test" include("extensions/homotopy_continuation.jl")
         @safetestset "LabelledArrays Test" include("extensions/labelledarrays.jl")
         @safetestset "BifurcationKit Extension Test" include("extensions/bifurcationkit.jl")
-        @safetestset "InfiniteOpt Extension Test" include("extensions/test_infiniteopt.jl")
         # @safetestset "Auto Differentiation Test" include("extensions/ad.jl")
-        @safetestset "Dynamic Optimization Collocation Solvers" include("extensions/dynamic_optimization.jl")
+    end
+
+    if GROUP == "All" || GROUP == "Optimization"
+        activate_optimization_env()
+        @safetestset "OptimizationSystem Test" include("optimization/optimizationsystem.jl")
+        @safetestset "InfiniteOpt Extension Test" include("optimization/test_infiniteopt.jl")
+        @safetestset "Dynamic Optimization Collocation Solvers" include("optimization/dynamic_optimization.jl")
+    end
+
+    if GROUP == "All" || GROUP == "QA"
+        activate_qa_env()
+        @safetestset "JET Tests" include("qa/jet.jl")
+        @safetestset "Aqua Tests" include("qa/aqua.jl")
     end
 end

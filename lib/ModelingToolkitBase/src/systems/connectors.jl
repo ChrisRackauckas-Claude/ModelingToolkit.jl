@@ -390,6 +390,21 @@ struct RotationMatrix
 
 end
 
+"""
+    $TYPEDSIGNATURES
+
+Compute the angular velocity `w` from the rotation matrix `R` and its derivative
+`DR = Differential(t)(R)`.
+"""
+@inline get_w(R::Arr{Num, 2}, t) = get_w(unwrap(R), t)::Vector{SymbolicT}
+@inline get_w(R::SymbolicT, t::Num) = get_w(R, unwrap(t))::Vector{SymbolicT}
+
+function get_w(R::SymbolicT, t::SymbolicT)
+    R = collect(R)::Matrix{SymbolicT}
+    DR = map(Differential(t), R)
+    return [R[3, :]'DR[2, :], -R[3, :]'DR[1, :], R[2, :]'DR[1, :]]::Vector{SymbolicT}
+end
+
 "Return orientation object of a multibody frame."
 function ori(sys)
     return getmetadata(sys, FrameOrientation, nothing)::Union{RotationMatrix, Nothing}
@@ -838,6 +853,27 @@ function _flow_equations_from_idxs!(sys::AbstractSystem, eqs::Vector{Equation}, 
     return
 end
 
+struct CausalConnectionSetNoSourceError <: Exception
+    cset::Vector{ConnectionVertex}
+end
+
+function Base.showerror(io::IO, err::CausalConnectionSetNoSourceError)
+    println(
+        io, """
+        Found a causal connection set with no source. For a causal connection set to be valid \
+        it must have one outer input or one inner output. Typically, this happens when a \
+        component incorrectly has two input ports or two output ports instead of one input \
+        and one output port.
+
+        Problematic connection set:
+        """
+    )
+    for cvar in err.cset
+        println(io, "  ", cvar, " ", cvar.type === InputVar ? "(Input)" : "(Output)")
+    end
+    return
+end
+
 """
     $(TYPEDSIGNATURES)
 
@@ -880,6 +916,13 @@ function generate_connection_equations_and_stream_connections(
                     end
                     inner_output = cvert
                 end
+            end
+            if inner_output !== nothing
+                root_vert = inner_output
+            elseif outer_input !== nothing
+                root_vert = outer_input
+            else
+                throw(CausalConnectionSetNoSourceError(cset))
             end
             root_vert = something(inner_output, outer_input)
             root_var = variable_from_vertex(sys, root_vert)::SymbolicT
@@ -1020,11 +1063,15 @@ function expand_connections(sys::AbstractSystem, ::Val{with_source_info} = Val(f
     sys, (csets, domain_csets) = generate_connection_set(sys)
     # generate equations, and stream equations
     ceqs, instream_csets = generate_connection_equations_and_stream_connections(sys, csets)
-    stream_eqs, instream_subs = expand_instream(instream_csets, sys; tol = tol)
-
     if with_source_info
         source_visitor = SourceInformationVisitor()
         eqs = equations(sys, source_visitor)
+    else
+        eqs = equations(sys)
+    end
+    stream_eqs, instream_subs = expand_instream(instream_csets, sys; tol = tol, eqs)
+
+    if with_source_info
         N = length(eqs) + length(ceqs) + length(stream_eqs)
         sources = source_visitor.sources
         # Names are in reverse order
@@ -1045,7 +1092,7 @@ function expand_connections(sys::AbstractSystem, ::Val{with_source_info} = Val(f
         end
         source_info = EquationSourceInformation(sources, is_connection_equation)
     else
-        eqs = [equations(sys); ceqs; stream_eqs]
+        eqs = [eqs; ceqs; stream_eqs]
     end
     if !isempty(instream_subs)
         # substitute `instream(..)` expressions with their new values
@@ -1106,9 +1153,8 @@ variable approaches zero.
 """
 function expand_instream(
         csets::Vector{Vector{ConnectionVertex}}, sys::AbstractSystem;
-        tol = 1.0e-8
+        tol = 1.0e-8, eqs = equations(sys)
     )
-    eqs = equations(sys)
     # collect all `instream` terms in the equations
     instream_exprs = Set{SymbolicT}()
     for eq in eqs

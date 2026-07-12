@@ -547,7 +547,7 @@ const CONDITION_SIMPLIFIER = Rewriters.Fixpoint(
 If lifting converts (nested) if statements into a series of continuous events + a logically equivalent if statement + parameters.
 
 Lifting proceeds through the following process:
-* rewrite comparisons to be of the form eqn [op] 0; subtract the RHS from the LHS 
+* rewrite comparisons to be of the form eqn [op] 0; subtract the RHS from the LHS
 * replace comparisons with generated parameters; for each comparison eqn [op] 0, generate an event (dependent on op) that sets the parameter
 
 !!! warn
@@ -630,7 +630,7 @@ function IfLifting(sys::System)
     # "observed" equations
     new_cond_dep_eqs = [v ~ cw.conditions[v] for v in new_cond_vars]
     # construct the graph as a `DiCMOBiGraph`
-    new_cond_vars_graph = observed_dependency_graph(new_cond_dep_eqs)
+    new_cond_vars_graph = observed_dependency_graph(sys, new_cond_dep_eqs)
 
     new_callbacks = continuous_events(sys)
     new_initial_conditions = copy(initial_conditions(sys))

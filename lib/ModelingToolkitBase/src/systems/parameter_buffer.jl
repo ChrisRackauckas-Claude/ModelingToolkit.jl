@@ -65,6 +65,7 @@ function MTKParameters(
         error("Cannot create MTKParameters if system does not have index_cache")
     end
     all_ps = Set(get_ps(sys))
+    diffcache_params = SU.getmetadata(sys, DiffCacheParams, Dict{SymbolicT, Int}())::Dict{SymbolicT, Int}
     if !fast_path
         op = operating_point_preprocess(sys, op)
         if floatT === nothing
@@ -91,7 +92,7 @@ function MTKParameters(
             haskey(op, arr) || continue
             push!(to_rm, p)
         end
-        setdiff!(missing_ps, keys(op), to_rm)
+        setdiff!(missing_ps, keys(op), to_rm, keys(diffcache_params))
         isempty(missing_ps) || throw(MissingParametersError(collect(missing_ps)))
     end
 
@@ -103,7 +104,11 @@ function MTKParameters(
         op[get_iv(sys)] = t0
     end
 
-    evaluate_varmap!(op, all_ps; limit = substitution_limit)
+    # Substitute through `AADSubWrapper` so that `COMMON_NOTHING` holes in partially
+    # specified array values are never substituted into expressions (issue #4607).
+    wrapped_op = AADSubWrapper(op)
+    ir = get_irstructure(sys)
+    evaluate_varmap!(ir, wrapped_op, all_ps; limit = substitution_limit)
 
     tunable_buffer = Vector{ic.tunable_buffer_size.type}(
         undef, ic.tunable_buffer_size.length
@@ -152,21 +157,36 @@ function MTKParameters(
         end
         return done
     end
+
+    diffcaches_buffer_idx = 0
+    diffcache_sizes = zeros(Int, length(diffcache_params))
+    if !isempty(diffcache_params)
+        representative = first(keys(diffcache_params))
+        diffcaches_buffer_idx, _ = ic.nonnumeric_idx[representative]
+        for (param, len) in diffcache_params
+            _, j = ic.nonnumeric_idx[param]
+            diffcache_sizes[j] = len
+        end
+    end
+
     for sym in all_ps
-        val = fixpoint_sub(sym, op; maxiters = max(div(substitution_limit, 2), 2), fold = Val(true))
+        haskey(diffcache_params, sym) && continue
+        val = fixpoint_sub(sym, wrapped_op; maxiters = max(div(substitution_limit, 2), 2), fold = Val(true))
         ctype = symtype(sym)
-        if !SU.isconst(val)
-            Moshi.Match.@match sym begin
-                BSImpl.Term(; f, args) && if f isa Initial end => begin
-                    if isequal(val, args[1])
-                        if Symbolics.isarraysymbolic(sym)
-                            val = BSImpl.Const{VartypeT}(fill(false, size(val)))
-                        else
-                            val = BSImpl.Const{VartypeT}(false)
-                        end
+        if !SU.isconst(val) && isinitial(sym)
+            # The value of an `Initial` parameter that cannot be fully evaluated
+            # refers to variables not fixed by the operating point. Treat such
+            # (elements of) the value as unfixed, mirroring the `COMMON_NOTHING`
+            # handling below.
+            if SU.is_array_shape(SU.shape(val))
+                val = BSImpl.Const{VartypeT}(
+                    map(SU.stable_eachindex(val)) do i
+                        el = val[i]
+                        SU.isconst(el) ? unwrap_const(el) : false
                     end
-                end
-                _ => nothing
+                )
+            else
+                val = BSImpl.Const{VartypeT}(false)
             end
         end
         if !SU.isconst(val)
@@ -198,6 +218,15 @@ function MTKParameters(
     end
     disc_buffer = narrow_buffer_type.(disc_buffer; p_constructor)
     const_buffer = narrow_buffer_type.(const_buffer; p_constructor)
+
+    if !iszero(diffcaches_buffer_idx)
+        cache_elT = eltype(initials_buffer)
+        diffcaches_elT = DiffCacheAllocatorAPIWrapper{cache_elT}
+        @set! nonnumeric_buffer[diffcaches_buffer_idx] = Vector{diffcaches_elT}(nonnumeric_buffer[diffcaches_buffer_idx])
+        for (i, len) in enumerate(diffcache_sizes)
+            nonnumeric_buffer[diffcaches_buffer_idx][i] = DiffCacheAllocatorAPIWrapper(DiffCache(zeros(cache_elT, len)))
+        end
+    end
     # Don't narrow nonnumeric types
     if !isempty(nonnumeric_buffer)
         nonnumeric_buffer = map(p_constructor, nonnumeric_buffer)
@@ -1043,7 +1072,7 @@ function DiffEqBase.anyeltypedual(
         p::Type{<:MTKParameters{T}},
         ::Type{Val{counter}} = Val{0}
     ) where {counter} where {T}
-    return DiffEqBase.__anyeltypedual(T)
+    return DiffEqBase.anyeltypedual(T)
 end
 
 # for compiling callbacks

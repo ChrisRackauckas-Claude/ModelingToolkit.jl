@@ -2,6 +2,7 @@ using Test
 using ModelingToolkitBase
 using ModelingToolkitBase: t_nounits as t, D_nounits as D
 using OrdinaryDiffEq
+using SciMLBase
 
 @connector function TwoPhaseFluidPort(; name, P = 0.0, m_flow = 0.0, h_outflow = 0.0)
     pars = @parameters begin
@@ -551,6 +552,7 @@ function OneFluidSystem(; name)
         connect(pipe_a.HB, volume_a.H)
         connect(source_b.H, pipe_b.HA)
         connect(pipe_b.HB, volume_b.H)
+        source_a.H.dm ~ 0
     ]
 
     return System(eqs, t, vars, pars; name, systems)
@@ -574,7 +576,7 @@ end
         vars = @variables begin
             p(t), [guess = 0.0, description = "Pressure, Pa"]
             md(t), [connect = Flow, guess = 0.0, description = "Mass flow, kg/s"]
-            x(t)[1:Ns], [connect = Stream, guess = 1 / Ns, description = "Mass fractions, -"]
+            x(t)[1:Ns], [connect = Stream, guess = ones(Ns) / Ns, description = "Mass fractions, -"]
         end
         System(Equation[], t, vars, []; name = name)
     end

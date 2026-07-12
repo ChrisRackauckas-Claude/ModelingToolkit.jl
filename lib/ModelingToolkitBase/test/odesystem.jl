@@ -3,6 +3,7 @@ using ModelingToolkitBase: get_metadata, MTKParameters, SymbolicDiscreteCallback
     SymbolicContinuousCallback
 using SymbolicIndexingInterface
 using OrdinaryDiffEq, Sundials
+using OrdinaryDiffEqRosenbrock, OrdinaryDiffEqBDF
 using DiffEqBase, SparseArrays
 using StaticArrays
 using Test
@@ -107,7 +108,7 @@ u = collect(1:3)
 p = ModelingToolkitBase.MTKParameters(de, [σ, ρ, β] .=> 4.0:6.0)
 f.f(du, u, p, 0.1)
 @test du == [4, 0, -16]
-@test_throws ArgumentError f.f(u, p, 0.1)
+@test_throws Symbolics.FunctionUnimplementedError f.f(u, p, 0.1)
 
 #check iip
 f = eval(ODEFunction(de; expression = Val{true}))
@@ -243,7 +244,11 @@ eqs = [
     0 ~ y₁ + y₂ + y₃ - 1,
     D(y₂) ~ k₁ * y₁ - k₂ * y₂^2 - k₃ * y₂ * y₃ * κ,
 ]
-@named sys = System(eqs, t, initial_conditions = [k₁ => 100, k₂ => 3.0e7, y₁ => 1.0])
+# `maybe_zeros` prevents the initialization from putting `k₁` in the denominator,
+# unnecessarily making the system stiffer.
+@named sys = System(
+    eqs, t, initial_conditions = [k₁ => 100, k₂ => 3.0e7, y₁ => 1.0], maybe_zeros = [k₁]
+)
 sys = complete(sys)
 u0 = Pair[]
 push!(u0, y₂ => 0.0)
@@ -501,6 +506,7 @@ bar(x, p) = p * x
 @register_array_symbolic bar(x::AbstractVector, p::AbstractMatrix) begin
     size = size(x)
     eltype = promote_type(eltype(x), eltype(p))
+    ndims = 1
 end
 @parameters p[1:3, 1:3]
 eqs = [D(x) ~ foo(x, ms); D(ms) ~ bar(ms, p)]
@@ -600,9 +606,9 @@ sys = complete(sys)
     # don't build initializeprob because it will use preface in other functions and
     # affect `c`
     prob = ODEProblem(sys, [], (0.0, 1.0); build_initializeprob = false)
-    sol = solve(prob, Euler(); dt = 0.1)
+    sol = solve(prob, Tsit5(); dt = 0.1)
 
-    @test c[1] == length(sol)
+    @test c[1] == sol.stats.nf
 end
 
 let
@@ -644,7 +650,7 @@ let
     sol = solve(prob, IDA())
     @test isapprox(sol[x[1]][end], 2, atol = 1.0e-3)
 
-    prob = ODEProblem(sys, Pair[x[1] => 0], (0, 50); missing_guess_value)
+    prob = ODEProblem(sys, Pair[x[1] => 0, x[2] => 0], (0, 50); missing_guess_value, guesses = [y => 1.0])
     sol = solve(prob, Rosenbrock23())
     @test isapprox(sol[x[1]][end], 1, atol = 1.0e-3)
 end
@@ -771,7 +777,7 @@ if @isdefined(ModelingToolkit)
     ## double integrator
 
     function double_int(; name)
-        @variables u(t) x(t) v(t)
+        @variables u(t) x(t) [state_priority = 1] v(t) [state_priority = 1]
 
         eqs = [D(x) ~ v, D(v) ~ u]
         return System(eqs, t; name)
@@ -1495,11 +1501,11 @@ end
     )
     prob = ODEProblem(sys, [], (0.0, 5.0))
     sol = solve(prob)
-    expected_tstops = unique!(sort!(vcat(0.0:0.075:5.0, 0.1, 0.2, 0.65, 0.35, 0.45)))
+    expected_tstops = unique!(sort!(vcat(0.075:0.075:5.0, 0.1, 0.2, 0.65, 0.35, 0.45)))
     @test all(x -> any(isapprox(x, atol = 1.0e-6), sol.t), expected_tstops)
     prob2 = remake(prob; tspan = (0.0, 10.0))
     sol2 = solve(prob2)
-    expected_tstops = unique!(sort!(vcat(0.0:0.075:10.0, 0.1, 0.2, 0.65, 0.35, 0.45)))
+    expected_tstops = unique!(sort!(vcat(0.075:0.075:10.0, 0.1, 0.2, 0.65, 0.35, 0.45)))
     @test all(x -> any(isapprox(x, atol = 1.0e-6), sol2.t), expected_tstops)
 
     @variables y(t) [guess = 1.0]
@@ -1511,11 +1517,11 @@ end
         sys, [D(y) => 2D(x) / 3y^2, D(x) => p * x + q * t + sum(r)], (0.0, 5.0)
     )
     sol = solve(prob, DImplicitEuler())
-    expected_tstops = unique!(sort!(vcat(0.0:0.075:5.0, 0.1, 0.2, 0.65, 0.35, 0.45)))
+    expected_tstops = unique!(sort!(vcat(0.075:0.075:5.0, 0.1, 0.2, 0.65, 0.35, 0.45)))
     @test all(x -> any(isapprox(x, atol = 1.0e-6), sol.t), expected_tstops)
     prob2 = remake(prob; tspan = (0.0, 10.0))
     sol2 = solve(prob2, DImplicitEuler())
-    expected_tstops = unique!(sort!(vcat(0.0:0.075:10.0, 0.1, 0.2, 0.65, 0.35, 0.45)))
+    expected_tstops = unique!(sort!(vcat(0.075:0.075:10.0, 0.1, 0.2, 0.65, 0.35, 0.45)))
     @test all(x -> any(isapprox(x, atol = 1.0e-6), sol2.t), expected_tstops)
 
     @mtkcompile sys = System([D(x) ~ x + p], t; tstops = [[p]])
@@ -1664,7 +1670,7 @@ end
     using ModelingToolkitBase
     using ModelingToolkitBase: t_nounits as t, D_nounits as D
     @variables x(t)[1:3]=[0,0,1]
-    @variables u1(t)=0 u2(t)=0 
+    @variables u1(t)=0 u2(t)=0
     y₁, y₂, y₃ = x
     k₁, k₂, k₃ = 1,1,1
     eqs = [

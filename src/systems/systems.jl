@@ -8,7 +8,7 @@ unknowns of the system may be eliminated as observables, eliminating the need fo
 numerical solver to solve for these variables.
 
 Does not rely on metadata to identify variables/parameters/brownians. Instead, queries
-the system for which symbolic quantites belong to which category. Any variables not
+the system for which symbolic quantities belong to which category. Any variables not
 present in the equations of the system will be removed in this process.
 
 # Keyword Arguments
@@ -30,6 +30,7 @@ function MTKBase.__mtkcompile(
     )
     sys, statemachines = extract_top_level_statemachines(sys)
     sys, source_info = expand_connections(sys, Val(true))
+    sys = MTKBase.discover_maybe_zeros(sys)
     state = TearingState(sys, source_info; sort_eqs)
     append!(state.statemachines, statemachines)
 
@@ -127,7 +128,8 @@ function MTKBase.__mtkcompile(
             guesses = guesses(sys), initialization_eqs = initialization_equations(sys),
             continuous_events = continuous_events(sys),
             discrete_events = discrete_events(sys),
-            gui_metadata = get_gui_metadata(sys)
+            gui_metadata = get_gui_metadata(sys),
+            tstops = symbolic_tstops(sys)
         )
         return ssys
     end

@@ -182,6 +182,7 @@ in the model. They compile to standard callbacks from `DiffEqCallbacks.jl`.
 ```@docs
 ModelingToolkit.SymbolicContinuousCallback
 ModelingToolkit.SymbolicDiscreteCallback
+ModelingToolkit.AssignmentAffect
 ```
 
 The affect functions for the above callbacks can be symbolic or user-defined functions.
@@ -241,7 +242,7 @@ has the ability to represent them. Compilation strategies can be implemented ind
 on top of [`mtkcompile`](@ref) using the `additional_passes` functionality.
 
 !!! warn
-    
+
     These operators are considered experimental API.
 
 ```@docs; canonical = false
@@ -265,7 +266,7 @@ While ModelingToolkit has the capability to represent state machines, it lacks t
 to compile and simulate them.
 
 !!! warn
-    
+
     This functionality is considered experimental API
 
 ```@docs

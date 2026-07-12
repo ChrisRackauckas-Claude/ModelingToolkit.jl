@@ -2,6 +2,11 @@
 $(DocStringExtensions.README)
 """
 module ModelingToolkitBase
+
+if isdefined(Base, :Experimental) && isdefined(Base.Experimental, Symbol("@max_methods"))
+    @eval Base.Experimental.@compiler_options max_methods = 1
+end
+
 using PrecompileTools, Reexport
 @recompile_invalidations begin
     using StaticArrays
@@ -13,6 +18,7 @@ using PrecompileTools, Reexport
     using OffsetArrays: Origin
     import BlockArrays: BlockArray, BlockedArray, Block, blocksize, blocksizes, blockpush!,
         undef_blocks, blocks
+    import BandedMatrices: BandedMatrices, BandedMatrix, bandwidths
 end
 
 import SymbolicUtils
@@ -37,12 +43,6 @@ using SymbolicIndexingInterface
 using LinearAlgebra, SparseArrays
 using InteractiveUtils
 using DataStructures
-@static if pkgversion(DataStructures) >= v"0.19"
-    import DataStructures: IntDisjointSet
-else
-    import DataStructures: IntDisjointSets
-    const IntDisjointSet = IntDisjointSets
-end
 using Base.Threads
 using ArrayInterface
 using Setfield, ConstructionBase
@@ -51,13 +51,14 @@ using DocStringExtensions
 using Base: RefValue
 using Combinatorics
 import FunctionWrappersWrappers
+import FunctionWrappersWrappers: FunctionWrappersWrapper
 import FunctionWrappers: FunctionWrapper
 using SciMLStructures
 using Compat
 using AbstractTrees
 using SciMLBase: StandardODEProblem, StandardNonlinearProblem, handle_varmap, TimeDomain,
     PeriodicClock, Clock, SolverStepClock, ContinuousClock, OverrideInit,
-    NoInit
+    NoInit, AbstractNonlinearProblem
 import Moshi
 using Moshi.Data: @data
 using Reexport
@@ -75,7 +76,7 @@ using Symbolics: parse_vars, value, @derivatives, get_variables,
     exprs_occur_in, symbolic_linear_solve, unwrap, wrap,
     VariableSource, getname, variable,
     NAMESPACE_SEPARATOR, setdefaultval, Arr,
-    hasnode, fixpoint_sub, CallAndWrap, SArgsT, SSym, STerm
+    hasnode, fixpoint_sub, CallAndWrap, SArgsT, SSym, STerm, SConst
 const NAMESPACE_SEPARATOR_SYMBOL = Symbol(NAMESPACE_SEPARATOR)
 import Symbolics: rename, get_variables!, _solve, hessian_sparsity,
     jacobian_sparsity, isaffine, islinear, _iszero, _isone,
@@ -97,12 +98,15 @@ import DifferentiationInterface as DI
 using ADTypes: AutoForwardDiff
 import SciMLPublic: @public
 import PreallocationTools
-import PreallocationTools: DiffCache
+import PreallocationTools: DiffCache, get_tmp
 import FillArrays
 using BipartiteGraphs
 import Random: AbstractRNG
 # To handle `Integral` in a type-stable manner
 import DomainSets
+# For `LinearInitializationProblem`
+import SCCNonlinearSolve
+using TaskLocalValues: TaskLocalValue
 
 export @derivatives
 
@@ -187,10 +191,14 @@ include("systems/imperative_affect.jl")
 include("systems/callbacks.jl")
 include("systems/system.jl")
 include("systems/analysis_points.jl")
+include("systems/ir_info.jl")
 include("systems/codegen_utils.jl")
 include("problems/docs.jl")
 include("systems/codegen.jl")
 include("systems/problem_utils.jl")
+# Operator + lowering layer; must load before the problem constructors that
+# consume it (problems/nonlinearproblem.jl selector + problems/homotopyproblem.jl).
+include("systems/homotopy_operator.jl")
 
 include("problems/compatibility.jl")
 include("problems/odeproblem.jl")
@@ -199,6 +207,7 @@ include("problems/daeproblem.jl")
 include("problems/sdeproblem.jl")
 include("problems/sddeproblem.jl")
 include("problems/nonlinearproblem.jl")
+include("problems/homotopyproblem.jl")
 include("problems/intervalnonlinearproblem.jl")
 include("problems/implicitdiscreteproblem.jl")
 include("problems/discreteproblem.jl")
@@ -237,6 +246,7 @@ const t_nounits = let
 end
 const D_nounits = Differential(t_nounits)
 
+export CompilerOptions
 export ODEFunction, convert_system_indepvar,
     System, OptimizationSystem, JumpSystem, SDESystem, NonlinearSystem, ODESystem
 export SDEFunction
@@ -245,16 +255,20 @@ export ImplicitDiscreteProblem, ImplicitDiscreteFunction
 export ODEProblem, SDEProblem
 export NonlinearFunction
 export NonlinearProblem
+# `AbstractNonlinearProblem(sys, op)` is the automatic constructor that selects a
+# `HomotopyProblem` when `sys` contains `homotopy(...)` nodes (see
+# `problems/homotopyproblem.jl`); re-exported so it is reachable unqualified.
+export AbstractNonlinearProblem
 export IntervalNonlinearFunction
 export IntervalNonlinearProblem
 export OptimizationProblem, constraints
 export SteadyStateProblem
-export JumpProblem
+export JumpProblem, SymbolicMassActionJump
 export flatten
 export connect, domain_connect, @connector, Connection, AnalysisPoint, Flow, Stream,
     instream
-export @component, @mtkcompile, @mtkbuild
-export isinput, isoutput, getbounds, hasbounds, getguess, hasguess, isdisturbance,
+export @component, @mtkcompile, @mtkbuild, @mtkcomplete
+export isinput, isoutput, getbounds, hasbounds, getnominal, hasnominal, setnominal, getguess, hasguess, isdisturbance,
     istunable, getdist, hasdist,
     tunable_parameters, isirreducible, getdescription, hasdescription,
     hasunit, getunit, hasconnect, getconnect,
@@ -272,7 +286,7 @@ export SymScope, LocalScope, ParentScope, GlobalScope
 export independent_variable, equations, observed, full_equations, jumps, cost,
     brownians
 export initialization_equations, guesses, bindings, initial_conditions, hierarchy
-export state_priorities, irreducibles
+export state_priorities, irreducibles, maybe_zeros
 export mtkcompile, expand_connections, structural_simplify
 export solve
 export Pre
@@ -298,6 +312,8 @@ export generate_initializesystem, Initial, isinitial, InitializationProblem
 
 export alg_equations, diff_equations, has_alg_equations, has_diff_equations
 export get_alg_eqs, get_diff_eqs, has_alg_eqs, has_diff_eqs
+
+export homotopy
 
 export @variables, @parameters, @independent_variables, @constants, @brownians, @brownian,
     @poissonians, @discretes
@@ -328,6 +344,8 @@ export DynamicOptSolution
 export MissingGuessValue
 export MiscSystemData
 
+export AssignmentAffect
+
 const set_scalar_metadata = setmetadata
 
 @public apply_to_variables, equations_toplevel, unknowns_toplevel, parameters_toplevel
@@ -337,19 +355,39 @@ const set_scalar_metadata = setmetadata
 @public unbound_outputs, is_bound
 @public AbstractSystem, CheckAll, CheckNone, CheckComponents, CheckUnits
 @public t, D, t_nounits, D_nounits
-@public SymbolicContinuousCallback, SymbolicDiscreteCallback
+@public SymbolicContinuousCallback, SymbolicDiscreteCallback, ImperativeAffect
 @public VariableType, MTKVariableTypeCtx, VariableBounds, VariableConnectType
 @public VariableDescription, VariableInput, VariableIrreducible, VariableMisc
 @public VariableOutput, VariableStatePriority, VariableUnit, collect_scoped_vars!
 @public collect_var_to_name!, collect_vars!, eqtype_supports_collect_vars, hasdefault
-@public getdefault, setdefault, iscomplete, isparameter, modified_unknowns!
+@public getdefault, setdefault, setguess, iscomplete, isparameter, modified_unknowns!
 @public renamespace, namespace_equations
+@public check_mutable_cache, store_to_mutable_cache!, should_invalidate_mutable_cache_entry
+@public convert_bindings_for_time_independent_system, get_w
+@public Both
+@public SymbolicADDisallowed, check_symbolic_ad_allowed
 
 for prop in [SYS_PROPS; [:continuous_events, :discrete_events]]
     getter = Symbol(:get_, prop)
     hasfn = Symbol(:has_, prop)
     @eval @public $getter, $hasfn
 end
+
+# AbstractSystem types should be treated as inactive (constant) for Enzyme.
+# Property access on systems retrieves symbolic metadata, not numerical values.
+import EnzymeCore
+function EnzymeCore.EnzymeRules.inactive_noinl(
+        ::typeof(Base.getproperty), ::AbstractSystem, ::Symbol,
+    )
+    return true
+end
+# Declare the type itself inactive so Enzyme's runtime-activity dispatch
+# (e.g. `MixedDuplicated`-wrapping) never tries to track a `System` as a
+# differentiable value. Without this, `Enzyme.gradient(set_runtime_activity(Reverse),
+# Const(loss), p)` over a closure capturing an MTK-generated problem
+# (which transitively carries the symbolic `System`) trips a
+# `MethodError MixedDuplicated(::System, ::System)` in `create_activity_wrapper`.
+EnzymeCore.EnzymeRules.inactive_type(::Type{<:AbstractSystem}) = true
 
 function __init__()
     SU.hashcons(unwrap(t_nounits), true)
@@ -358,7 +396,17 @@ function __init__()
     SU.hashcons(COMMON_TRUE, true)
     SU.hashcons(COMMON_FALSE, true)
     SU.hashcons(COMMON_SENTINEL, true)
-    return SU.hashcons(COMMON_INF, true)
+    SU.hashcons(COMMON_INF, true)
+    SU.hashcons(MTKPARAMETERS_ARG, true)
+    SU.hashcons(COMMON_DEFAULT_VAR, true)
+    SU.hashcons(DDE_HISTORY_FUN, true)
+    SU.hashcons(BVP_SOLUTION, true)
+    SU.hashcons(unwrap(W_GAMMA), true)
+    SU.hashcons(unwrap(ASSERTION_LOG_VARIABLE), true)
+    SU.hashcons(DDE_AT_IDX_SYM, true)
+    SU.hashcons(DDE_DELAY_SYM, true)
+    SU.hashcons(MTKUNKNOWNS_ARG, true)
+    return nothing
 end
 
 include("precompile.jl")

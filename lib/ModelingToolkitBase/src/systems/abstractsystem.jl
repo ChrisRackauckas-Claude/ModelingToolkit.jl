@@ -40,6 +40,7 @@ function generate_custom_function(
             dvs,
             p...,
             get_iv(sys);
+            u_arg = 1,
             kwargs...,
             expression = Val{true}
         )
@@ -48,6 +49,7 @@ function generate_custom_function(
             sys, exprs,
             dvs,
             p...;
+            u_arg = 1,
             kwargs...,
             expression = Val{true}
         )
@@ -55,10 +57,10 @@ function generate_custom_function(
     if expression == Val{true}
         return fnexpr
     end
-    if fnexpr isa Tuple
+    if SU.is_array_shape(SU.shape(unwrap(exprs)))
         return eval_or_rgf.(fnexpr; eval_expression, eval_module)
     else
-        return eval_or_rgf(fnexpr; eval_expression, eval_module)
+        return eval_or_rgf(fnexpr[1]; eval_expression, eval_module)
     end
 end
 
@@ -74,6 +76,7 @@ function wrap_assignments(isscalar, assignments; let_block = false)
 end
 
 const MTKPARAMETERS_ARG = SSym(:___mtkparameters___; type = Vector{Vector{Any}}, shape = SymbolicUtils.Unknown(1))
+const MTKUNKNOWNS_ARG = SSym(:___mtkunknowns___; type = Vector{Real}, shape = SymbolicUtils.Unknown(1))
 
 """
     $(TYPEDSIGNATURES)
@@ -410,7 +413,7 @@ SymbolicIndexingInterface.supports_tuple_observed(::AbstractSystem) = true
 
 function SymbolicIndexingInterface.observed(
         sys::AbstractSystem, sym; eval_expression = false, eval_module = @__MODULE__,
-        checkbounds = true, cse = true
+        checkbounds = true, cse = true, optimize = nothing,
     )
     if has_index_cache(sys) && (ic = get_index_cache(sys)) !== nothing
         if sym isa Symbol
@@ -437,7 +440,7 @@ function SymbolicIndexingInterface.observed(
         end
     end
     return build_explicit_observed_function(
-        sys, sym; eval_expression, eval_module, checkbounds, cse
+        sys, sym; eval_expression, eval_module, checkbounds, cse, optimize
     )
 end
 
@@ -463,7 +466,8 @@ end
 
 function SymbolicIndexingInterface.all_symbols(sys::AbstractSystem)
     syms = all_variable_symbols(sys)
-    for other in (parameters(sys; initial_parameters = true), collect(bound_parameters(sys)), independent_variable_symbols(sys))
+    bp = iscomplete(sys) ? collect(bound_parameters(sys)) : ()
+    for other in (parameters(sys; initial_parameters = true), bp, independent_variable_symbols(sys))
         isempty(other) || (syms = vcat(syms, other))
     end
     return syms
@@ -555,7 +559,7 @@ end
 
 supports_initialization(sys::AbstractSystem) = true
 
-function add_initialization_parameters(sys::AbstractSystem; split = true)
+function add_initialization_parameters(sys::AbstractSystem; split = true, _unhack_sys = nothing)
     @assert !has_systems(sys) || isempty(get_systems(sys))
     supports_initialization(sys) || return sys
     is_initializesystem(sys) && return sys
@@ -563,8 +567,7 @@ function add_initialization_parameters(sys::AbstractSystem; split = true)
     all_initialvars = Set{SymbolicT}()
     # time-independent systems don't initialize unknowns
     # but may initialize parameters using guesses for unknowns
-    eqs = equations(sys)
-    _sys = unhack_system(sys)
+    _sys = _unhack_sys === nothing ? reverse_all_default_reversible_transformations(sys) : _unhack_sys
     obs = observed(_sys)
     eqs = equations(_sys)
     for x in unknowns(_sys)
@@ -605,7 +608,14 @@ function add_initialization_parameters(sys::AbstractSystem; split = true)
     end
 
     for (k, v) in bindings(sys)
-        v === COMMON_MISSING && push!(all_initialvars, k)
+        v === COMMON_MISSING || continue
+        if split
+            push!(all_initialvars, k)
+        else
+            for i in SU.stable_eachindex(k)
+                push!(all_initialvars, k[i])
+            end
+        end
     end
 
     initials = collect(all_initialvars)
@@ -619,12 +629,17 @@ end
 """
 Returns true if the parameter `p` is of the form `Initial(x)`.
 """
+function isinitial(p::SymbolicT)
+    p, _ = split_indexed_var(p)
+    return Moshi.Match.@match p begin
+        BSImpl.Term(; f) => f isa Initial
+        _ => false
+    end
+end
 function isinitial(p)
-    p = unwrap(p)
-    return iscall(p) && (
-        operation(p) isa Initial ||
-            operation(p) === getindex && isinitial(arguments(p)[1])
-    )
+    up = unwrap(p)
+    up === p && return false
+    return isinitial(up)
 end
 
 """
@@ -683,14 +698,15 @@ function complete(
         end
         sys = newsys
         check_no_parameter_equations(sys)
+        _unhack_sys = reverse_all_default_reversible_transformations(sys)
         if add_initial_parameters
-            sys = add_initialization_parameters(sys; split)::T
+            sys = add_initialization_parameters(sys; split, _unhack_sys)::T
         end
-        cb_alg_eqs = Equation[alg_equations(sys); observed(sys)]
+        cb_alg_eqs = Equation[alg_equations(_unhack_sys); observed(_unhack_sys)]
         if has_continuous_events(sys) && is_time_dependent(sys)
             cevts = SymbolicContinuousCallback[]
             for ev in get_continuous_events(sys)
-                ev = complete(ev; iv = get_iv(sys)::SymbolicT, alg_eqs = cb_alg_eqs)
+                ev = complete(ev; iv = get_iv(sys)::SymbolicT, extra_eqs = cb_alg_eqs)
                 push!(cevts, ev)
             end
             @set! sys.continuous_events = cevts
@@ -698,7 +714,7 @@ function complete(
         if has_discrete_events(sys) && is_time_dependent(sys)
             devts = SymbolicDiscreteCallback[]
             for ev in get_discrete_events(sys)
-                ev = complete(ev; iv = get_iv(sys)::SymbolicT, alg_eqs = cb_alg_eqs)
+                ev = complete(ev; iv = get_iv(sys)::SymbolicT, extra_eqs = cb_alg_eqs)
                 push!(devts, ev)
             end
             @set! sys.discrete_events = devts
@@ -708,6 +724,9 @@ function complete(
         @set! sys.parameter_bindings_graph = nothing
     end
     if split && has_index_cache(sys)
+        # The `IndexCache` constructor uses `is_parameter` and family. If the system already
+        # contains an index cache, it'll get wrong results.
+        @set! sys.index_cache = nothing
         @set! sys.index_cache = IndexCache(sys)
         # Ideally we'd do `get_ps` but if `flatten = false`
         # we don't get all of them. So we call `parameters`.
@@ -928,6 +947,8 @@ const SYS_PROPS = [
     :is_discrete
     :state_priorities
     :irreducibles
+    :maybe_zeros
+    :irstructure_tlv
     :assertions
     :ignored_connections
     :parent
@@ -977,21 +998,45 @@ Invalidate cached jacobians, etc.
 """
 function invalidate_cache!(sys::AbstractSystem)
     has_metadata(sys) || return sys
-    empty!(getmetadata(sys, MutableCacheKey, nothing))
+    cache_tlv = getmetadata(sys, MutableCacheKey, nothing)
+    if cache_tlv isa MutableCacheTLVT
+        cache = cache_tlv[]::MutableCacheT
+        # Avoid clearing the linear expansion cache. It doesn't depend on anything in the
+        # system, just useful to have around.
+        filter!(Base.Fix2(===, LinearExpansionCache) ∘ first, cache)
+    end
     return sys
 end
 
+function maybe_invalidate_cache(cache::Dict{DataType, Any}, patch::NamedTuple)
+    filterer = !Base.Fix2(typeassert, Bool) ∘ Base.Fix2(should_invalidate_mutable_cache_entry, patch) ∘ first
+    return filter(filterer, cache)
+end
+function maybe_invalidate_cache(cache::Dict{DataType, Any}, patch::Nothing)
+    empty(cache)
+    return cache
+end
+
 # `::MetadataT` but that is defined later
-function refreshed_metadata(meta::Base.ImmutableDict)
+function refreshed_metadata(meta::Base.ImmutableDict, patch = nothing)
     newmeta = MetadataT()
+    hascache = false
     for (k, v) in meta
+        # `Base.ImmutableDict` is like a stack. New key-value pairs (even with the same key)
+        # are inserted at the top of the stack. `getindex` returns the first matching key.
+        # We ignore repetitions of a key we've already encountered to avoid overwriting
+        # newer entries with lingering older ones.
+        haskey(newmeta, k) && continue
         if k === MutableCacheKey
-            v = MutableCacheT()
+            hascache = true
+            new_cache = maybe_invalidate_cache((v::MutableCacheTLVT)[]::MutableCacheT, patch)::MutableCacheT
+            v = __new_mutable_cache_tlv()
+            v[] = new_cache
         end
         newmeta = Base.ImmutableDict(newmeta, k => v)
     end
-    if !haskey(newmeta, MutableCacheKey)
-        newmeta = Base.ImmutableDict(newmeta, MutableCacheKey => MutableCacheT())
+    if !hascache
+        newmeta = Base.ImmutableDict(newmeta, MutableCacheKey => __new_mutable_cache_tlv())
     end
     return newmeta
 end
@@ -999,13 +1044,19 @@ end
 function Setfield.get(obj::AbstractSystem, ::Setfield.PropertyLens{field}) where {field}
     return getfield(obj, field)
 end
+"""
+    ConstructionBase.setproperties(sys::AbstractSystem, patch::NamedTuple)
+
+Return a new system with the properties in `patch` updated. Performs additional
+validation and cache invalidation as required.
+"""
 @generated function ConstructionBase.setproperties(obj::AbstractSystem, patch::NamedTuple)
     if issubset(fieldnames(patch), fieldnames(obj))
         args = map(fieldnames(obj)) do fn
             if fn in fieldnames(patch)
                 :(patch.$fn)
             elseif fn == :metadata
-                :($refreshed_metadata(getfield(obj, $(Meta.quot(fn)))))
+                :($refreshed_metadata(getfield(obj, $(Meta.quot(fn))), patch))
             else
                 :(getfield(obj, $(Meta.quot(fn))))
             end
@@ -1391,7 +1442,8 @@ function namespace_jump(j::MassActionJump, sys)
     return MassActionJump(
         namespace_expr(j.scaled_rates, sys),
         [namespace_expr(k, sys) => namespace_expr(v, sys) for (k, v) in j.reactant_stoch],
-        [namespace_expr(k, sys) => namespace_expr(v, sys) for (k, v) in j.net_stoch]
+        [namespace_expr(k, sys) => namespace_expr(v, sys) for (k, v) in j.net_stoch];
+        scale_rates = false
     )
 end
 
@@ -1561,6 +1613,27 @@ function __no_initial_params_pred(x::SymbolicT)
     end
 end
 
+struct CachedSystemParameters
+    value::Vector{SymbolicT}
+end
+
+function should_invalidate_mutable_cache_entry(::Type{CachedSystemParameters}, patch::NamedTuple)
+    return haskey(patch, :ps) || haskey(patch, :systems)
+end
+
+function _unfiltered_parameters(sys::AbstractSystem)
+    ps = get_ps(sys)
+    ps === SciMLBase.NullParameters() && return SymbolicT[]
+    if eltype(ps) <: Pair
+        ps = Vector{SymbolicT}(unwrap.(first.(ps)))
+    end
+    result = OrderedSet{SymbolicT}(ps)
+    for subsys in get_systems(sys)
+        union!(result, namespace_parameters(subsys))
+    end
+    return collect(result)
+end
+
 """
 $(TYPEDSIGNATURES)
 
@@ -1569,19 +1642,18 @@ Get the parameters of the system `sys` and its subsystems.
 See also [`@parameters`](@ref) and [`ModelingToolkitBase.get_ps`](@ref).
 """
 function parameters(sys::AbstractSystem; initial_parameters = false)
-    ps = get_ps(sys)
-    if ps === SciMLBase.NullParameters()
-        return SymbolicT[]
+    if sys isa System && iscomplete(sys)
+        cached = check_mutable_cache(sys, CachedSystemParameters, CachedSystemParameters, nothing)
+        if cached isa CachedSystemParameters
+            result = copy(cached.value)
+        else
+            base = _unfiltered_parameters(sys)
+            store_to_mutable_cache!(sys, CachedSystemParameters, CachedSystemParameters(base))
+            result = copy(base)
+        end
+    else
+        result = _unfiltered_parameters(sys)
     end
-    if eltype(ps) <: Pair
-        ps = Vector{SymbolicT}(unwrap.(first.(ps)))
-    end
-    systems = get_systems(sys)
-    result = OrderedSet{SymbolicT}(ps)
-    for subsys in systems
-        union!(result, namespace_parameters(subsys))
-    end
-    result = collect(result)
     if !initial_parameters && !is_initializesystem(sys)
         filter!(__no_initial_params_pred, result)
     end
@@ -1664,8 +1736,9 @@ function guesses(sys::AbstractSystem)
     guess = get_guesses(sys)
     systems = get_systems(sys)
     isempty(systems) && return guess
+    guess = copy(guess)
     for subsys in systems
-        guess = merge(guess, namespace_guesses(subsys))
+        guess = left_merge!(guess, namespace_guesses(subsys))
     end
     return guess
 end
@@ -1765,6 +1838,17 @@ function irreducibles(sys::AbstractSystem)
         union!(ircs, namespace_expr(irreducibles(s), s))
     end
     return ircs
+end
+
+function maybe_zeros(sys::AbstractSystem)
+    dds = get_maybe_zeros(sys)
+    systems = get_systems(sys)
+    isempty(systems) && return dds
+    dds = copy(dds)
+    for s in systems
+        union!(dds, namespace_expr(maybe_zeros(s), s))
+    end
+    return dds
 end
 
 function initial_conditions_and_guesses(sys::AbstractSystem)
@@ -1887,6 +1971,17 @@ function equations(sys::AbstractSystem, visitor::AbstractRecursivePropertyVisito
     return eqs
 end
 
+"""
+    $TYPEDSIGNATURES
+
+Check if `sys` or any of its subcomponents have equations. This avoids having to
+do `isempty(equations(sys))` which can be expensive to materialize.
+"""
+function has_some_equations(sys::AbstractSystem)
+    isempty(get_eqs(sys)) || return true
+    return any(has_some_equations, get_systems(sys))
+end
+
 function equations_source(sys::AbstractSystem)
     source = Vector{Symbol}[]
     for _ in eachindex(get_eqs(sys))
@@ -1929,7 +2024,7 @@ Recursively substitute `dict` into `expr`. Use `Symbolics.simplify` on the expre
 if `simplify == true`.
 """
 function substitute_and_simplify(expr, dict::AbstractDict, simplify::Bool)
-    expr = substitute(expr, dict; filterer = Symbolics.FPSubFilterer{Union{Initial, Pre}}())
+    expr = substitute(expr, dict; filterer = Symbolics.FPSubFilterer{Union{Initial, Pre, Differential}}())
     return simplify ? Symbolics.simplify(expr) : expr
 end
 
@@ -1954,6 +2049,20 @@ equations during `mtkcompile`. These equations matches generated numerical code.
 See also [`equations`](@ref) and [`ModelingToolkitBase.get_eqs`](@ref).
 """
 function full_equations(sys::AbstractSystem; simplify = false)
+    subsys = get_systems(sys)
+    # Fast path using `IRInfo`
+    if isempty(subsys)
+        new_eqs = Equation[]
+        eqs = equations(sys)
+        sizehint!(new_eqs, length(eqs))
+        info = get_ir_info(sys)
+        ir = get_irstructure(sys)
+        @assert length(info.eqs_idxs) == length(eqs)
+        for (eq, rhs_idx) in zip(eqs, info.eqs_idxs)
+            push!(new_eqs, eq.lhs ~ ir[rhs_idx])
+        end
+        return new_eqs
+    end
     empty_substitutions(sys) && return equations(sys)
     subs = get_substitutions(sys)
     neweqs = map(equations(sys)) do eq
@@ -2170,7 +2279,7 @@ end
 ###
 ### System utils
 ###
-struct ObservedFunctionCache{S}
+struct ObservedFunctionCache{S, O}
     sys::S
     dict::Dict{Any, Any}
     steady_state::Bool
@@ -2178,22 +2287,24 @@ struct ObservedFunctionCache{S}
     eval_module::Module
     checkbounds::Bool
     cse::Bool
+    optimize::O
 end
 
 function ObservedFunctionCache(
         sys; expression = Val{false}, steady_state = false, eval_expression = false,
-        eval_module = @__MODULE__, checkbounds = true, cse = true
+        eval_module = @__MODULE__, checkbounds = true, cse = true, optimize = nothing,
     )
     return if expression == Val{true}
         :(
             $ObservedFunctionCache(
                 $sys, Dict(), $steady_state, $eval_expression,
-                $eval_module, $checkbounds, $cse
+                $eval_module, $checkbounds, $cse, $optimize
             )
         )
     else
         ObservedFunctionCache(
-            sys, Dict(), steady_state, eval_expression, eval_module, checkbounds, cse
+            sys, Dict(), steady_state, eval_expression, eval_module, checkbounds, cse,
+            optimize,
         )
     end
 end
@@ -2207,8 +2318,9 @@ function Base.deepcopy_internal(ofc::ObservedFunctionCache, stackdict::IdDict)
     eval_module = ofc.eval_module
     checkbounds = ofc.checkbounds
     cse = ofc.cse
+    optimize = ofc.optimize
     newofc = ObservedFunctionCache(
-        sys, dict, steady_state, eval_expression, eval_module, checkbounds, cse
+        sys, dict, steady_state, eval_expression, eval_module, checkbounds, cse, optimize
     )
     stackdict[ofc] = newofc
     return newofc
@@ -2218,7 +2330,8 @@ function (ofc::ObservedFunctionCache)(obsvar, args...)
     obs = get!(ofc.dict, value(obsvar)) do
         SymbolicIndexingInterface.observed(
             ofc.sys, obsvar; eval_expression = ofc.eval_expression,
-            eval_module = ofc.eval_module, checkbounds = ofc.checkbounds, cse = ofc.cse
+            eval_module = ofc.eval_module, checkbounds = ofc.checkbounds, cse = ofc.cse,
+            optimize = ofc.optimize
         )
     end
     if ofc.steady_state
@@ -2598,7 +2711,7 @@ function _named(name, call, runtime = false)
     end
     op = call.args[1]
     return quote
-        $is_sys_construction = ($op isa $DataType) && ($op <: $AbstractSystem)
+        $is_sys_construction = ($op isa $Type) && ($op <: $AbstractSystem)
         $call
     end
 end
@@ -2844,6 +2957,33 @@ macro component(expr)
 end
 
 """
+Shared helper for `@mtkcompile` and `@mtkcomplete`. Applies `@named` to the first
+expression, then calls `func` on the resulting system, forwarding any extra keyword arguments.
+"""
+function _named_and_call(func, exprs)
+    expr = exprs[1]
+    named_expr = ModelingToolkitBase.named_expr(expr)
+    name = named_expr.args[1]
+    kwargs = Base.tail(exprs)
+    kwargs = map(kwargs) do ex
+        @assert ex.head == :(=)
+        Expr(:kw, ex.args[1], ex.args[2])
+    end
+    if isempty(kwargs)
+        kwargs = ()
+    else
+        kwargs = (Expr(:parameters, kwargs...),)
+    end
+    call_expr = Expr(:call, func, kwargs..., name)
+    return esc(
+        quote
+            $named_expr
+            $name = $call_expr
+        end
+    )
+end
+
+"""
     $(TYPEDSIGNATURES)
 
 Macro shorthand for building and compiling a system in one step.
@@ -2860,26 +3000,27 @@ sys = mtkcompile(sys)
 ```
 """
 macro mtkcompile(exprs...)
-    expr = exprs[1]
-    named_expr = ModelingToolkitBase.named_expr(expr)
-    name = named_expr.args[1]
-    kwargs = Base.tail(exprs)
-    kwargs = map(kwargs) do ex
-        @assert ex.head == :(=)
-        Expr(:kw, ex.args[1], ex.args[2])
-    end
-    if isempty(kwargs)
-        kwargs = ()
-    else
-        kwargs = (Expr(:parameters, kwargs...),)
-    end
-    call_expr = Expr(:call, mtkcompile, kwargs..., name)
-    return esc(
-        quote
-            $named_expr
-            $name = $call_expr
-        end
-    )
+    return _named_and_call(mtkcompile, exprs)
+end
+
+"""
+    $(TYPEDSIGNATURES)
+
+Macro shorthand for naming and completing a system in one step.
+
+```julia
+@mtkcomplete sys = Constructor(args...; kwargs....)
+```
+
+Is shorthand for
+
+```julia
+@named sys = Constructor(args...; kwargs...)
+sys = complete(sys)
+```
+"""
+macro mtkcomplete(exprs...)
+    return _named_and_call(complete, exprs)
 end
 
 """

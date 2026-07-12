@@ -1,4 +1,6 @@
 using ModelingToolkitBase, OrdinaryDiffEq, SymbolicIndexingInterface
+using SciMLBase
+using SymbolicUtils: unwrap
 using ModelingToolkitBase: t_nounits as t, D_nounits as D
 using Test
 
@@ -139,4 +141,20 @@ end
     solve!(integ)
     sol = integ.sol
     @test sol.ps[d2].count == 0
+end
+
+@testset "Derivatives dependent on observed" begin
+    @variables x(t) y(t)
+    @mtkcompile sys = System([D(x) ~ y, y ~ 2t + 1], t)
+    @test length(equations(sys)) == 1
+    v = ModelingToolkitBase.default_toterm(unwrap(D(x)))
+    fn = ModelingToolkitBase.build_explicit_observed_function(sys, v)
+    ps = MTKParameters(sys, nothing)
+    @test fn([1.0], ps, 1.5) ≈ 4.0
+end
+
+@testset "Non-scalarized array observed without individual elements being unknowns/observables" begin
+    @variables x(t)[1:3] y(t)
+    @mtkcomplete sys = System([D(y) ~ 2y + sum(x)], t, [y], []; observed = [x ~ [y, y + 1, y + 2]])
+    @test ModelingToolkitBase.observed_equations_used_by(sys, [x[1]]) == [1]
 end

@@ -178,7 +178,15 @@ function IndexCache(sys::AbstractSystem)
         push!(disc_buffer_templates, map(Base.Fix1(BufferTemplate, symtype) ∘ length, disc_syms_by_partition))
     end
 
+    diffcache_params = SU.getmetadata(sys, DiffCacheParams, Dict{SymbolicT, Int}())::Dict{SymbolicT, Int}
+    # Diffcache params added via `add_diffcache` are special.
+    for p in keys(diffcache_params)
+        buffer = get!(Set{SymbolicT}, nonnumeric_buffers, DiffCacheAllocatorAPIWrapper{Number})
+        push!(buffer, p)
+    end
+
     for p in parameters(sys; initial_parameters = true)
+        haskey(diffcache_params, p) && continue
         ctype = symtype(p)
         if ctype <: FnType
             ctype = fntype_to_function_type(ctype)::TypeT
@@ -187,12 +195,15 @@ function IndexCache(sys::AbstractSystem)
         haskey(constant_buffers, ctype) && p in constant_buffers[ctype] && continue
         haskey(nonnumeric_buffers, ctype) && p in nonnumeric_buffers[ctype] && continue
         insert_by_type!(
-            if ctype <: Real || ctype <: AbstractArray{<:Real}
+            if ctype <: Number || ctype <: AbstractArray{<:Number}
                 if istunable(p, true) && symbolic_has_known_size(p) &&
                         (
-                        ctype == Real || ctype <: AbstractFloat ||
-                            ctype <: AbstractArray{Real} ||
-                            ctype <: AbstractArray{<:AbstractFloat}
+                        ctype == Real || ctype == Number || ctype == Complex ||
+                            ctype <: AbstractFloat || ctype <: Complex ||
+                            ctype <: AbstractArray{Real} || ctype <: AbstractArray{Number} ||
+                            ctype <: AbstractArray{Complex} ||
+                            ctype <: AbstractArray{<:AbstractFloat} ||
+                            ctype <: AbstractArray{<:Complex}
                     )
                     if iscall(p) && operation(p) === Initial()
                         initial_pars
@@ -358,7 +369,8 @@ function get_observed_and_dependent_to_timeseries(
         return observed_syms_to_timeseries, dependent_pars_to_timeseries
     end
 
-    varsbuf = Set{SymbolicT}()
+    ir = get_irstructure(sys)
+    varsbuf = SU.IRStructureSearchBuffer(ir, Set{SymbolicT}())
     for eq in observed(sys)
         sym = eq.lhs
         empty!(varsbuf)
@@ -576,9 +588,38 @@ end
 
 const ReorderedParametersT = Vector{Union{Vector{SymbolicT}, Vector{Vector{SymbolicT}}}}
 
-function reorder_parameters(
-        sys::AbstractSystem, ps = parameters(sys; initial_parameters = true); kwargs...
+struct ReorderedDefaultParameters
+    value::ReorderedParametersT
+end
+
+function should_invalidate_mutable_cache_entry(::Type{ReorderedDefaultParameters}, patch::NamedTuple)
+    return haskey(patch, :ps) || haskey(patch, :index_cache)
+end
+
+function _copy_reordered(v::ReorderedParametersT)
+    return ReorderedParametersT(
+        map(v) do inner
+            inner isa Vector{SymbolicT} ? copy(inner) : map(copy, inner)
+        end
     )
+end
+
+function reorder_parameters(sys::AbstractSystem; kwargs...)
+    if isempty(kwargs) && sys isa System && has_index_cache(sys) && get_index_cache(sys) !== nothing
+        cached = check_mutable_cache(sys, ReorderedDefaultParameters, ReorderedDefaultParameters, nothing)
+        if cached isa ReorderedDefaultParameters
+            return _copy_reordered(cached.value)
+        end
+        val = reorder_parameters(
+            get_index_cache(sys)::IndexCache, parameters(sys; initial_parameters = true)
+        )
+        store_to_mutable_cache!(sys, ReorderedDefaultParameters, ReorderedDefaultParameters(val))
+        return _copy_reordered(val)
+    end
+    return reorder_parameters(sys, parameters(sys; initial_parameters = true); kwargs...)
+end
+
+function reorder_parameters(sys::AbstractSystem, ps; kwargs...)
     if has_index_cache(sys) && get_index_cache(sys) !== nothing
         return reorder_parameters(get_index_cache(sys)::IndexCache, ps; kwargs...)
     elseif ps isa Tuple
@@ -624,28 +665,31 @@ function reorder_parameters(ic::IndexCache, ps::Vector{SymbolicT}; drop_missing 
         push!(result, nonnumeric_buf)
     end
     for p in ps
-        if haskey(ic.discrete_idx, p)
-            idx = ic.discrete_idx[p]
+        if (idx = get(ic.discrete_idx, p, nothing)) !== nothing
             disc_buf[idx.buffer_idx][idx.idx_in_buffer] = p
-        elseif haskey(ic.tunable_idx, p)
-            i = ic.tunable_idx[p]
+        elseif (i = get(ic.tunable_idx, p, nothing)) !== nothing
             if i isa Int
                 param_buf[i] = p
             else
-                param_buf[i] = collect(p)
+                i = (first(i)::Int):(last(i)::Int)
+                for (buf_i, p_i) in zip(i, SU.stable_eachindex(p))
+                    param_buf[buf_i] = p[p_i]
+                end
             end
-        elseif haskey(ic.initials_idx, p)
-            i = ic.initials_idx[p]
+        elseif (i = get(ic.initials_idx, p, nothing)) !== nothing
             if i isa Int
                 initials_buf[i] = p
             else
-                initials_buf[i] = collect(p)
+                i = (first(i)::Int):(last(i)::Int)
+                for (buf_i, p_i) in zip(i, SU.stable_eachindex(p))
+                    initials_buf[buf_i] = p[p_i]
+                end
             end
-        elseif haskey(ic.constant_idx, p)
-            i, j = ic.constant_idx[p]
+        elseif (ij = get(ic.constant_idx, p, nothing)) !== nothing
+            i, j = ij
             const_buf[i][j] = p
-        elseif haskey(ic.nonnumeric_idx, p)
-            i, j = ic.nonnumeric_idx[p]
+        elseif (ij = get(ic.nonnumeric_idx, p, nothing)) !== nothing
+            i, j = ij
             nonnumeric_buf[i][j] = p
         else
             error("Invalid parameter $p")

@@ -1,7 +1,9 @@
 using ModelingToolkitBase
 using ModelingToolkitBase: t_nounits as t, D_nounits as D
 import InfiniteOpt
-using DiffEqDevTools, DiffEqBase
+using DiffEqBase
+import OrdinaryDiffEqExplicitTableaus as ExplicitTableaus
+import OrdinaryDiffEqImplicitTableaus as ImplicitTableaus
 using SimpleDiffEq
 using OrdinaryDiffEqSDIRK, OrdinaryDiffEqVerner, OrdinaryDiffEqTsit5, OrdinaryDiffEqFIRK
 using Ipopt
@@ -33,26 +35,26 @@ const ENABLE_CASADI = VERSION >= v"1.11"
 
     # Test explicit method.
     jprob = JuMPDynamicOptProblem(sys, [u0map; parammap], tspan, dt = 0.01)
-    jsol = solve(jprob, JuMPCollocation(Ipopt.Optimizer, constructRK4()))
+    jsol = solve(jprob, JuMPCollocation(Ipopt.Optimizer, ExplicitTableaus.RK4()))
     oprob = ODEProblem(sys, [u0map; parammap], tspan)
     osol = solve(oprob, SimpleRK4(), dt = 0.01)
 
     @test jsol.sol.u ≈ osol.u
     if ENABLE_CASADI
         cprob = CasADiDynamicOptProblem(sys, [u0map; parammap], tspan, dt = 0.01)
-        csol = solve(cprob, CasADiCollocation("ipopt", constructRK4()))
+        csol = solve(cprob, CasADiCollocation("ipopt", ExplicitTableaus.RK4()))
         @test csol.sol.u ≈ osol.u
     end
 
     # Implicit method.
     osol2 = solve(oprob, ImplicitEuler(), dt = 0.01, adaptive = false)
-    jsol2 = solve(jprob, JuMPCollocation(Ipopt.Optimizer, constructImplicitEuler()))
+    jsol2 = solve(jprob, JuMPCollocation(Ipopt.Optimizer, ImplicitTableaus.ImplicitEuler()))
     @test ≈(jsol2.sol.u, osol2.u, rtol = 0.001)
     iprob = InfiniteOptDynamicOptProblem(sys, [u0map; parammap], tspan, dt = 0.01)
     isol = solve(iprob, InfiniteOptCollocation(Ipopt.Optimizer))
     @test ≈(isol.sol.u, osol2.u, rtol = 0.001)
     if ENABLE_CASADI
-        csol2 = solve(cprob, CasADiCollocation("ipopt", constructImplicitEuler()))
+        csol2 = solve(cprob, CasADiCollocation("ipopt", ImplicitTableaus.ImplicitEuler()))
         @test ≈(csol2.sol.u, osol2.u, rtol = 0.001)
     end
     if @isdefined(Pyomo)
@@ -70,7 +72,7 @@ const ENABLE_CASADI = VERSION >= v"1.11"
     jprob = JuMPDynamicOptProblem(
         lksys, [u0map; parammap], tspan; guesses = guess, dt = 0.01
     )
-    jsol = solve(jprob, JuMPCollocation(Ipopt.Optimizer, constructTsitouras5()))
+    jsol = solve(jprob, JuMPCollocation(Ipopt.Optimizer, ExplicitTableaus.Tsitouras5()))
     @test jsol.sol(0.6; idxs = x(t)) ≈ 3.5
     @test jsol.sol(0.3; idxs = x(t)) ≈ 7.0
 
@@ -78,7 +80,7 @@ const ENABLE_CASADI = VERSION >= v"1.11"
         cprob = CasADiDynamicOptProblem(
             lksys, [u0map; parammap], tspan; guesses = guess, dt = 0.01
         )
-        csol = solve(cprob, CasADiCollocation("ipopt", constructTsitouras5()))
+        csol = solve(cprob, CasADiCollocation("ipopt", ExplicitTableaus.Tsitouras5()))
         @test csol.sol(0.6; idxs = x(t)) ≈ 3.5
         @test csol.sol(0.3; idxs = x(t)) ≈ 7.0
     end
@@ -118,7 +120,7 @@ const ENABLE_CASADI = VERSION >= v"1.11"
     jprob = JuMPDynamicOptProblem(
         lksys, [u0map; parammap], tspan; guesses = guess, dt = 0.01
     )
-    jsol = solve(jprob, JuMPCollocation(Ipopt.Optimizer, constructRadauIA3()))
+    jsol = solve(jprob, JuMPCollocation(Ipopt.Optimizer, ImplicitTableaus.RadauIA3()))
     @test all(u -> u > [1, 1], jsol.sol.u)
 
     if @isdefined(Pyomo)
@@ -133,7 +135,7 @@ const ENABLE_CASADI = VERSION >= v"1.11"
         cprob = CasADiDynamicOptProblem(
             lksys, [u0map; parammap], tspan; guesses = guess, dt = 0.01
         )
-        csol = solve(cprob, CasADiCollocation("ipopt", constructRadauIA3()))
+        csol = solve(cprob, CasADiCollocation("ipopt", ImplicitTableaus.RadauIA3()))
         @test all(u -> u > [1, 1], csol.sol.u)
     end
 end
@@ -168,7 +170,7 @@ end
     parammap = [u(t) => 0.0]
     jprob = JuMPDynamicOptProblem(block, [u0map; parammap], tspan; dt = 0.01)
     jsol = solve(
-        jprob, JuMPCollocation(Ipopt.Optimizer, constructVerner8()), verbose = true
+        jprob, JuMPCollocation(Ipopt.Optimizer, ExplicitTableaus.Verner8()), verbose = true
     )
     # Linear systems have bang-bang controls
     @test is_bangbang(jsol.input_sol, [-1.0], [1.0])
@@ -177,7 +179,7 @@ end
 
     if ENABLE_CASADI
         cprob = CasADiDynamicOptProblem(block, [u0map; parammap], tspan; dt = 0.01)
-        csol = solve(cprob, CasADiCollocation("ipopt", constructVerner8()))
+        csol = solve(cprob, CasADiCollocation("ipopt", ExplicitTableaus.Verner8()))
         @test is_bangbang(csol.input_sol, [-1.0], [1.0])
         # Test reached final position.
         @test ≈(csol.sol[x(t)][end], 0.25, rtol = 1.0e-5)
@@ -211,6 +213,53 @@ end
     oprob = ODEProblem(block_ode, [u0map; u_interp => spline], tspan)
     @test ≈(isol.sol.u, osol.u, rtol = 0.05)
 
+    # Test user-provided bounds kwarg overriding metadata bounds
+    # With u ∈ (-0.5, 0.5) instead of (-1, 1), optimal x(1) = 0.125
+    jprob_b = JuMPDynamicOptProblem(
+        block, [u0map; parammap], tspan;
+        dt = 0.01, bounds = Dict(u(t) => (-0.5, 0.5))
+    )
+    jsol_b = solve(jprob_b, JuMPCollocation(Ipopt.Optimizer, ExplicitTableaus.Verner8()))
+    @test ≈(jsol_b.sol[x(t)][end], 0.125, rtol = 1.0e-4)
+
+    # Verify bounds are set as variable bounds, not nonlinear constraints
+    m = jprob_b.wrapped_model
+    @test InfiniteOpt.has_lower_bound(m.V[1])
+    @test InfiniteOpt.has_upper_bound(m.V[1])
+    @test InfiniteOpt.lower_bound(m.V[1]) == -0.5
+    @test InfiniteOpt.upper_bound(m.V[1]) == 0.5
+
+    iprob = InfiniteOptDynamicOptProblem(
+        block, [u0map; parammap], tspan;
+        dt = 0.01, bounds = Dict(u(t) => (-0.5, 0.5))
+    )
+    isol = solve(iprob, InfiniteOptCollocation(Ipopt.Optimizer))
+    @test ≈(isol.sol[x(t)][end], 0.125, rtol = 1.0e-4)
+
+    m = iprob.wrapped_model
+    @test InfiniteOpt.has_lower_bound(m.V[1])
+    @test InfiniteOpt.has_upper_bound(m.V[1])
+    @test InfiniteOpt.lower_bound(m.V[1]) == -0.5
+    @test InfiniteOpt.upper_bound(m.V[1]) == 0.5
+
+    if ENABLE_CASADI
+        cprob = CasADiDynamicOptProblem(
+            block, [u0map; parammap], tspan;
+            dt = 0.01, bounds = Dict(u(t) => (-0.5, 0.5))
+        )
+        csol = solve(cprob, CasADiCollocation("ipopt", ExplicitTableaus.Tsitouras5()))
+        @test ≈(csol.sol[x(t)][end], 0.125, rtol = 1.0e-4)
+    end
+
+    if @isdefined(Pyomo)
+        pprob = PyomoDynamicOptProblem(
+            block, [u0map; parammap], tspan;
+            dt = 0.01, bounds = Dict(u(t) => (-0.5, 0.5))
+        )
+        psol = solve(pprob, PyomoCollocation("ipopt", BackwardEuler()))
+        @test ≈(psol.sol[x(t)][end], 0.125, rtol = 1.0e-4)
+    end
+
     ###################
     ### Bee example ###
     ###################
@@ -231,14 +280,14 @@ end
     pmap = [b => 1, c => 1, μ => 1, s => 1, ν => 1, α => 1]
 
     jprob = JuMPDynamicOptProblem(beesys, [u0map; pmap], tspan, dt = 0.01)
-    jsol = solve(jprob, JuMPCollocation(Ipopt.Optimizer, constructTsitouras5()))
+    jsol = solve(jprob, JuMPCollocation(Ipopt.Optimizer, ExplicitTableaus.Tsitouras5()))
     @test is_bangbang(jsol.input_sol, [0.0], [1.0])
     iprob = InfiniteOptDynamicOptProblem(beesys, [u0map; pmap], tspan, dt = 0.01)
     isol = solve(iprob, InfiniteOptCollocation(Ipopt.Optimizer))
     @test is_bangbang(isol.input_sol, [0.0], [1.0])
     if ENABLE_CASADI
         cprob = CasADiDynamicOptProblem(beesys, [u0map; pmap], tspan; dt = 0.01)
-        csol = solve(cprob, CasADiCollocation("ipopt", constructTsitouras5()))
+        csol = solve(cprob, CasADiCollocation("ipopt", ExplicitTableaus.Tsitouras5()))
         @test is_bangbang(csol.input_sol, [0.0], [1.0])
     end
     if @isdefined(Pyomo)
@@ -263,12 +312,12 @@ end
         ),
         tspan
     )
-    osol = solve(oprob, Tsit5(); dt = 0.01, adaptive = false)
+    osol = solve(oprob, Tsit5(); saveat = 0.01)
     @test ≈(osol.u, jsol.sol.u, rtol = 0.01)
     if ENABLE_CASADI
         @test ≈(osol.u, csol.sol.u, rtol = 0.01)
     end
-    osol2 = solve(oprob, ImplicitEuler(); dt = 0.01, adaptive = false)
+    osol2 = solve(oprob, ImplicitEuler(); saveat = 0.01)
     @test ≈(osol2.u, isol.sol.u, rtol = 0.01)
 
     if @isdefined(Pyomo)
@@ -301,7 +350,7 @@ end
         Tₘ => 3.5 * g₀ * m₀, T => 0.0, h₀ => 1, m_c => 0.6,
     ]
     jprob = JuMPDynamicOptProblem(rocket, [u0map; pmap], (ts, te); dt = 0.001, cse = false)
-    jsol = solve(jprob, JuMPCollocation(Ipopt.Optimizer, constructRadauIIA5()))
+    jsol = solve(jprob, JuMPCollocation(Ipopt.Optimizer, ImplicitTableaus.RadauIIA5()))
     @test jsol.sol[h][end] > 1.012
 
     if ENABLE_CASADI
@@ -356,6 +405,32 @@ end
     end
 end
 
+@testset "Composed system with bound inputs" begin
+    # When subsystems are connected, inputs become "bound" in equations.
+    # Optimal control should still treat them as control variables.
+    @variables x(t) u(t) [input = true, bounds = (-1, 1)]
+    costs = [EvalAt(2.0)(x)^2]
+    cons = [EvalAt(0.0)(x) ~ 1.0]
+    @named plant = System([D(x) ~ u], t; costs, constraints = cons)
+
+    @variables y(t) [output = true] v(t) [input = true, bounds = (-1, 1)]
+    @named gain = System([y ~ v], t)
+
+    @named composed = System(
+        [connect(gain.y, plant.u)], t; systems = [plant, gain]
+    )
+    sys = mtkcompile(composed; inputs = [gain.v])
+
+    # After mtkcompile with connect, the input is bound but should still be a control
+    @test !isempty(M.inputs(sys))
+    @test isempty(M.unbound_inputs(sys))
+
+    jprob = JuMPDynamicOptProblem(sys, [plant.x => 1.0, gain.v => 0.0], (0.0, 2.0); dt = 0.1)
+    jsol = solve(jprob, JuMPCollocation(Ipopt.Optimizer, ImplicitTableaus.RadauIIA5()))
+    # Minimizing x(2)² with D(x) = u, x(0) = 1 → x(2) = 0 is achievable and optimal
+    @test jsol.sol[plant.x][end] ≈ 0.0 atol = 1.0e-5
+end
+
 @testset "Free final time problems" begin
 
     @variables x(..) u(..) [input = true, bounds = (0, 1)]
@@ -370,13 +445,13 @@ end
     u0map = [x(t) => 17.5]
     pmap = [u(t) => 0.0, tf => 8]
     jprob = JuMPDynamicOptProblem(rocket, [u0map; pmap], (0, tf); steps = 201)
-    jsol = solve(jprob, JuMPCollocation(Ipopt.Optimizer, constructTsitouras5()))
+    jsol = solve(jprob, JuMPCollocation(Ipopt.Optimizer, ExplicitTableaus.Tsitouras5()))
     @test isapprox(jsol.sol.t[end], 10.0, rtol = 1.0e-3)
     @test ≈(M.objective_value(jsol), -92.75, atol = 0.25)
 
     if ENABLE_CASADI
         cprob = CasADiDynamicOptProblem(rocket, [u0map; pmap], (0, tf); steps = 201)
-        csol = solve(cprob, CasADiCollocation("ipopt", constructTsitouras5()))
+        csol = solve(cprob, CasADiCollocation("ipopt", ExplicitTableaus.Tsitouras5()))
         @test isapprox(csol.sol.t[end], 10.0, rtol = 1.0e-3)
         @test ≈(M.objective_value(csol), -92.75, atol = 0.25)
     end
@@ -408,12 +483,12 @@ end
     tspan = (0.0, tf)
     parammap = [u(t) => 1.0, tf => 1.0]
     jprob = JuMPDynamicOptProblem(block, [u0map; parammap], tspan; steps = 51)
-    jsol = solve(jprob, JuMPCollocation(Ipopt.Optimizer, constructVerner8()))
+    jsol = solve(jprob, JuMPCollocation(Ipopt.Optimizer, ExplicitTableaus.Verner8()))
     @test isapprox(jsol.sol.t[end], 2.0, atol = 1.0e-5)
 
     if ENABLE_CASADI
         cprob = CasADiDynamicOptProblem(block, [u0map; parammap], (0, tf); steps = 51)
-        csol = solve(cprob, CasADiCollocation("ipopt", constructVerner8()))
+        csol = solve(cprob, CasADiCollocation("ipopt", ExplicitTableaus.Verner8()))
         @test isapprox(csol.sol.t[end], 2.0, atol = 1.0e-5)
     end
 
@@ -464,12 +539,12 @@ end
     u0map = [D(x(t)) => 0.0, D(θ(t)) => 0.0, θ(t) => 0.0, x(t) => 0.0]
     pmap = [mₖ => 1.0, mₚ => 0.2, l => 0.5, g => 9.81, u => 0]
     jprob = JuMPDynamicOptProblem(cartpole, [u0map; pmap], tspan; dt = 0.04)
-    jsol = solve(jprob, JuMPCollocation(Ipopt.Optimizer, constructRK4()))
+    jsol = solve(jprob, JuMPCollocation(Ipopt.Optimizer, ExplicitTableaus.RK4()))
     @test jsol.sol[var_order][end] ≈ [π, 0, 0, 0]
 
     if ENABLE_CASADI
         cprob = CasADiDynamicOptProblem(cartpole, [u0map; pmap], tspan; dt = 0.04)
-        csol = solve(cprob, CasADiCollocation("ipopt", constructRK4()))
+        csol = solve(cprob, CasADiCollocation("ipopt", ExplicitTableaus.RK4()))
         @test csol.sol[var_order][end] ≈ [π, 0, 0, 0]
     end
 
@@ -503,7 +578,7 @@ end
 
     # Only provide initial conditions, rely on parameter defaults
     jprob = JuMPDynamicOptProblem(sys, u0map, tspan, dt = 0.01)
-    jsol = solve(jprob, JuMPCollocation(Ipopt.Optimizer, constructRK4()))
+    jsol = solve(jprob, JuMPCollocation(Ipopt.Optimizer, ExplicitTableaus.RK4()))
 
     # Compare with ODEProblem that also uses defaults
     oprob = ODEProblem(sys, u0map, tspan)
@@ -517,7 +592,7 @@ end
 
     if ENABLE_CASADI
         cprob = CasADiDynamicOptProblem(sys, u0map, tspan, dt = 0.01)
-        csol = solve(cprob, CasADiCollocation("ipopt", constructRK4()))
+        csol = solve(cprob, CasADiCollocation("ipopt", ExplicitTableaus.RK4()))
         @test csol.sol.u ≈ osol.u
     end
 
@@ -555,7 +630,7 @@ end
 
     sys′ = subset_tunables(sys, [δ, α])
     jprob = JuMPDynamicOptProblem(sys′, u0map, tspan; dt = 1 / 50, tune_parameters = true)
-    jsol = solve(jprob, JuMPCollocation(Ipopt.Optimizer, constructTsitouras5()))
+    jsol = solve(jprob, JuMPCollocation(Ipopt.Optimizer, ExplicitTableaus.Tsitouras5()))
 
     @test jsol.sol.ps[δ] ≈ 1.8 rtol = 1.0e-4
     @test jsol.sol.ps[α] ≈ 2.5 rtol = 1.0e-4
@@ -564,7 +639,7 @@ end
 
     jprob = JuMPDynamicOptProblem(sys′, u0map, tspan; dt = 1 / 120, tune_parameters = true)
     err_msg = "Found extra 40 collocation points."
-    @test_throws err_msg solve(jprob, JuMPCollocation(Ipopt.Optimizer, constructTsitouras5()))
+    @test_throws err_msg solve(jprob, JuMPCollocation(Ipopt.Optimizer, ExplicitTableaus.Tsitouras5()))
 
     iprob = InfiniteOptDynamicOptProblem(sys′, u0map, tspan, dt = 1 / 50, tune_parameters = true)
     isol = solve(iprob, InfiniteOptCollocation(Ipopt.Optimizer, InfiniteOpt.OrthogonalCollocation(3)))
@@ -582,14 +657,14 @@ end
 
     if ENABLE_CASADI
         cprob = CasADiDynamicOptProblem(sys′, u0map, tspan; dt = 1 / 50, tune_parameters = true)
-        csol = solve(cprob, CasADiCollocation("ipopt", constructRK4()))
+        csol = solve(cprob, CasADiCollocation("ipopt", ExplicitTableaus.RK4()))
         @test csol.sol.ps[δ] ≈ 1.8 rtol = 1.0e-4
         @test csol.sol.ps[α] ≈ 2.5 rtol = 1.0e-4
 
         # test with different time stepping
 
         cprob = CasADiDynamicOptProblem(sys′, u0map, tspan; dt = 1 / 120, tune_parameters = true)
-        csol = solve(cprob, CasADiCollocation("ipopt", constructRK4()))
+        csol = solve(cprob, CasADiCollocation("ipopt", ExplicitTableaus.RK4()))
         @test csol.sol.ps[δ] ≈ 1.8 rtol = 1.0e-4
         @test csol.sol.ps[α] ≈ 2.5 rtol = 1.0e-3
     end
@@ -652,12 +727,12 @@ end
 
     # Test with JuMP backend as well
     jprob = JuMPDynamicOptProblem(sys, [u0map; pmap], tspan; dt = 0.1)
-    jsol = solve(jprob, JuMPCollocation(Ipopt.Optimizer, constructRK4()))
+    jsol = solve(jprob, JuMPCollocation(Ipopt.Optimizer, ExplicitTableaus.RK4()))
     @test jsol.sol[y][end] > 0
 
     if ENABLE_CASADI
         cprob = CasADiDynamicOptProblem(sys, [u0map; pmap], tspan; dt = 0.1)
-        csol = solve(cprob, CasADiCollocation("ipopt", constructRK4()))
+        csol = solve(cprob, CasADiCollocation("ipopt", ExplicitTableaus.RK4()))
         @test csol.sol[y][end] > 0
     end
 
@@ -669,4 +744,111 @@ end
     iprob2 = InfiniteOptDynamicOptProblem(sys_constrained, [u0map; pmap], tspan; dt = 0.1)
     isol2 = solve(iprob2, InfiniteOptCollocation(Ipopt.Optimizer))
     @test isol2.sol[y][end] > 0
+end
+
+@testset "Parameter bindings resolved in dynamic optimization pmap" begin
+    # When a subsystem parameter is bound to a parent parameter after mtkcompile,
+    # the pmap used for symbolic substitution must include the bound parameter values
+    # so that observed equations and constraints referencing pre-binding names resolve.
+
+    @parameters k = 2.0 q = k
+    @variables x(t) obs_val(t)
+    @variables u(t) [input = true, bounds = (-10.0, 10.0)]
+
+    # q is bound to k: after mtkcompile, q won't be in parameters(sys),
+    # but observed equations may reference it.
+    eqs = [
+        D(x) ~ -k * x + u,
+        obs_val ~ q * x,  # observed equation references bound parameter q
+    ]
+    cost = [-EvalAt(1.0)(obs_val)]
+
+    @named sys = System(eqs, t; costs = cost)
+    sys = mtkcompile(sys; inputs = [u])
+
+    # Confirm q is a bound parameter
+    @test q ∉ Set(parameters(sys))
+    b = bindings(sys)
+    @test haskey(b, q)
+
+    u0map = [x => 1.0]
+    pmap = [u => 0.0]
+    tspan = (0.0, 1.0)
+
+    # Without the binding resolution fix, this would fail because
+    # pmap would not contain q, and the cost substitution would be incomplete.
+    jprob = JuMPDynamicOptProblem(sys, [u0map; pmap], tspan; dt = 0.1)
+    jsol = solve(jprob, JuMPCollocation(Ipopt.Optimizer, ExplicitTableaus.RK4()))
+    @test jsol.sol[x][end] > jsol.sol[x][begin]
+
+    iprob = InfiniteOptDynamicOptProblem(sys, [u0map; pmap], tspan; dt = 0.1)
+    isol = solve(iprob, InfiniteOptCollocation(Ipopt.Optimizer))
+    @test isol.sol[x][end] > isol.sol[x][begin]
+
+    if ENABLE_CASADI
+        cprob = CasADiDynamicOptProblem(sys, [u0map; pmap], tspan; dt = 0.1)
+        csol = solve(cprob, CasADiCollocation("ipopt", ExplicitTableaus.RK4()))
+        @test csol.sol[x][end] > csol.sol[x][begin]
+    end
+
+    # test with free final t
+    @parameters tf
+    cost2 = [-EvalAt(tf)(obs_val)]
+
+    @named sys = System(eqs, t; costs = cost2)
+    sys = mtkcompile(sys; inputs = [u])
+
+    @test q ∉ Set(parameters(sys))
+
+    u0map = [x => 1.0]
+    pmap = [u => 0.0, tf => 1.0]
+    tspan = (0.0, tf)
+
+    jprob = JuMPDynamicOptProblem(sys, [u0map; pmap], tspan; steps = 101)
+    jsol = solve(jprob, JuMPCollocation(Ipopt.Optimizer, ExplicitTableaus.RK4()))
+    @test jsol.sol[x][end] > jsol.sol[x][begin]
+
+    if ENABLE_CASADI
+        cprob = CasADiDynamicOptProblem(sys, [u0map; pmap], tspan; steps = 101)
+        csol = solve(cprob, CasADiCollocation("ipopt", ExplicitTableaus.RK4()))
+        @test csol.sol[x][end] > csol.sol[x][begin]
+    end
+end
+
+@testset "Observed variables with bound parameters in constraints" begin
+    @parameters k = 2.0 q = k
+    @variables x(t) obs_val(t)
+    @variables u(t) [input = true, bounds = (-10.0, 10.0)]
+
+    eqs = [
+        D(x) ~ -k * x + u,
+        obs_val ~ q * x,
+    ]
+
+    # Fixed-time constraint using observed variable with bound parameter
+    constr = [EvalAt(1.0)(obs_val) ≲ 0.8]
+    @named sys = System(eqs, t; constraints = constr)
+    sys = mtkcompile(sys; inputs = [u])
+
+    @test q ∉ Set(parameters(sys))
+
+    u0map = [x => 1.0]
+    pmap = [u => 0.0]
+    tspan = (0.0, 1.0)
+
+    jprob = JuMPDynamicOptProblem(sys, [u0map; pmap], tspan; dt = 0.1)
+    jsol = solve(jprob, JuMPCollocation(Ipopt.Optimizer, ExplicitTableaus.RK4()))
+    # obs_val(1.0) = 2*x(1.0) should satisfy the constraint ≤ 5.0
+    @test 2 * jsol.sol[x][end] ≤ 0.8
+
+    # Free final time constraint using observed variable with bound parameter
+    @parameters tf
+    constr_tf = [EvalAt(tf)(obs_val) ≲ 0.8]
+    @named sys_tf = System(eqs, t; constraints = constr_tf)
+    sys_tf = mtkcompile(sys_tf; inputs = [u])
+
+    pmap_tf = [u => 0.0, tf => 1.0]
+    jprob_tf = JuMPDynamicOptProblem(sys_tf, [u0map; pmap_tf], (0.0, tf); steps = 101)
+    jsol_tf = solve(jprob_tf, JuMPCollocation(Ipopt.Optimizer, ExplicitTableaus.RK4()))
+    @test 2 * jsol_tf.sol[x][end] ≤ 0.8
 end

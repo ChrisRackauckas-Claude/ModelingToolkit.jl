@@ -191,7 +191,7 @@ end
 Generate `f1` and `f2` for [`SemilinearODEFunction`](@ref) (internally represented as a
 `SplitFunction`). `A`, `B`, `C` are the matrices returned from
 [`calculate_semiquadratic_form`](@ref). This expects that the system has the necessary
-extra parmameters added by [`add_semiquadratic_parameters`](@ref).
+extra parameters added by [`add_semiquadratic_parameters`](@ref).
 
 ## Keyword Arguments
 
@@ -334,25 +334,19 @@ function generate_semiquadratic_functions(
     end
 
     f1_iip = build_function_wrapper(
-        sys, nothing, Symbolics.DEFAULT_OUTSYM, dvs, ps..., iv; p_start = 3,
-        extra_assignments = f1_iip_ir, expression = Val{true}, kwargs...
-    )
+        sys, nothing, Symbolics.DEFAULT_OUTSYM, dvs, ps..., iv; u_arg = 2, p_start = 3,
+        extra_assignments = f1_iip_ir, expression = Val{true}, iip_config = (true, false), kwargs...
+    )[1]
     f2_iip = build_function_wrapper(
-        sys, nothing, Symbolics.DEFAULT_OUTSYM, dvs, ps..., iv; p_start = 3,
-        extra_assignments = f2_iip_ir, expression = Val{true}, kwargs...
-    )
+        sys, nothing, Symbolics.DEFAULT_OUTSYM, dvs, ps..., iv; u_arg = 2, p_start = 3,
+        extra_assignments = f2_iip_ir, expression = Val{true}, iip_config = (true, false), kwargs...
+    )[1]
     f1_oop = build_function_wrapper(
-        sys, f1_expr, dvs, ps..., iv; expression = Val{true}, kwargs...
-    )
-    if f1_oop isa NTuple{2, Expr}
-        f1_oop = f1_oop[1]
-    end
+        sys, f1_expr, dvs, ps..., iv; u_arg = 1, expression = Val{true}, iip_config = (true, false), kwargs...
+    )[1]
     f2_oop = build_function_wrapper(
-        sys, f2_expr, dvs, ps..., iv; expression = Val{true}, kwargs...
-    )
-    if f2_oop isa NTuple{2, Expr}
-        f2_oop = f2_oop[1]
-    end
+        sys, f2_expr, dvs, ps..., iv; u_arg = 1, expression = Val{true}, iip_config = (true, false), kwargs...
+    )[1]
 
     f1 = maybe_compile_function(
         expression, wrap_gfw, (2, 3, is_split(sys)),
@@ -373,7 +367,7 @@ Generate the jacobian of `f1` for [`SemilinearODEFunction`](@ref) (internally re
 `SplitFunction`). `A`, `B`, `C` are the matrices returned from
 [`calculate_semiquadratic_form`](@ref). `Cjac` is the jacobian of `C` with respect to the
 unknowns of the system, or `nothing` if `C === nothing`. This expects that the system has the
-necessary extra parmameters added by [`add_semiquadratic_parameters`](@ref).
+necessary extra parameters added by [`add_semiquadratic_parameters`](@ref).
 
 ## Keyword Arguments
 
@@ -516,13 +510,12 @@ function generate_semiquadratic_jacobian(
     end
     oop_expr = length(terms) == 1 ? only(terms) : term(+, terms...)
 
-    j_iip = build_function_wrapper(
-        sys, nothing, Symbolics.DEFAULT_OUTSYM, dvs, ps..., iv; p_start = 3,
-        extra_assignments = iip_ir, expression = Val{true}, kwargs...
+    j_iip, _ = build_function_wrapper(
+        sys, nothing, Symbolics.DEFAULT_OUTSYM, dvs, ps..., iv; u_arg = 2, p_start = 3,
+        extra_assignments = iip_ir, expression = Val{true}, iip_config = (true, false), kwargs...
     )
-    j_oop,
-        _ = build_function_wrapper(
-        sys, oop_expr, dvs, ps..., iv; expression = Val{true}, kwargs...
+    j_oop, _ = build_function_wrapper(
+        sys, oop_expr, dvs, ps..., iv; u_arg = 1, expression = Val{true}, iip_config = (true, false), kwargs...
     )
     return maybe_compile_function(
         expression, wrap_gfw, (2, 3, is_split(sys)),
@@ -537,7 +530,7 @@ Return the sparsity pattern of the  jacobian of `f1` for [`SemilinearODEFunction
 (internally represented as a `SplitFunction`). `A`, `B`, `C` are the matrices returned from
 [`calculate_semiquadratic_form`](@ref). `Cjac` is the jacobian of `C` with respect to the
 unknowns of the system, or `nothing` if `C === nothing`. This expects that the system has the
-necessary extra parmameters added by [`add_semiquadratic_parameters`](@ref).
+necessary extra parameters added by [`add_semiquadratic_parameters`](@ref).
 
 ## Keyword Arguments
 
@@ -574,43 +567,4 @@ function get_semiquadratic_W_sparsity(
     M_sparsity = mm isa UniformScaling ? sparse(I, M, N) :
         SparseMatrixCSC{Bool, Int64}((!iszero).(mm))
     return (!_iszero).(jac) .| M_sparsity
-end
-
-const SCP_BASIC = [
-    MATMUL_ADD_RULE,
-    TRIU_RULE,
-    TRIL_RULE,
-    NORMALIZE_RULE,
-    LDIV_RULE,
-]
-
-const SCP_AGGRESSIVE = [
-    SCP_BASIC;
-    HVNCAT_STATIC_RULE;
-]
-
-const SCP_OPTIONS = Dict(
-    :basic => SCP_BASIC,
-    :aggressive => SCP_AGGRESSIVE,
-    :none => nothing
-)
-
-function MTKBase.resolve_optimize_option(o::Bool)
-    return MTKBase.resolve_optimize_option(o ? SCP_BASIC : nothing)
-end
-
-function MTKBase.resolve_optimize_option(o::Symbol)
-    rules = get(SCP_OPTIONS, o, nothing)
-    return MTKBase.resolve_optimize_option(rules)
-end
-
-function MTKBase.resolve_optimize_option(o::Int)
-    if o == 0
-        return MTKBase.resolve_optimize_option(false)
-    elseif o == 1
-        return MTKBase.resolve_optimize_option(:basic)
-    elseif o == 2
-        return MTKBase.resolve_optimize_option(:aggressive)
-    end
-    throw(ArgumentError("Invalid optimize option integer: $o"))
 end

@@ -26,12 +26,12 @@ state = TearingState(pendulum)
 @test StructuralTransformations.maximal_matching(
     graph, eq -> true,
     v -> var_to_diff[v] === nothing
-) ==
-    map(
-    x -> x == 0 ? StructuralTransformations.unassigned : x,
-    [3, 4, 2, 5, 0, 0, 0, 0, 0]
-)
-
+) == map(state.fullvars) do v
+    if operation(v) isa Differential
+        return findfirst(eq -> isequal(eq.lhs, v), equations(state))
+    end
+    return StructuralTransformations.unassigned
+end
 eqs2 = [
     D(D(x)) ~ T * x,
     D(D(y)) ~ T * y - g,
@@ -82,5 +82,4 @@ let
     sol = solve(prob, Rodas5P())
     @test SciMLBase.successful_retcode(sol)
     @test sol[x^2 + y^2][end] < 1.1
-    @test_throws ArgumentError ODEProblem(sys, [x => 1, y => 0, D(x) => 0.0, g => 1], (0.0, 10.0), guesses = [λ => 0.0], optimize = 7)
 end

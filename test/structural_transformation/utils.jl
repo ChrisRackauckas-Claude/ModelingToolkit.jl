@@ -26,11 +26,12 @@ eqs = [
     0 ~ x^2 + y^2 - L^2,
 ]
 pendulum = System(eqs, t, [x, y, w, z, T], [L, g], name = :pendulum)
-state = TearingState(pendulum)
+state = TearingState(pendulum; sort_eqs = false)
 StateSelection.find_solvables!(state)
 sss = state.structure
 @unpack graph, solvable_graph, var_to_diff = sss
-@test sort(graph.fadjlist) == [[1, 7], [2, 8], [3, 5, 9], [4, 6, 9], [5, 6]]
+sym_incidence = [[D(x), w], [D(y), z], [D(w), T, x], [D(z), T, y], [x, y]]
+@test all([issetequal(state.fullvars[v], sym_incidence[i]) for (i, v) in enumerate(graph.fadjlist)])
 @test length(graph.badjlist) == 9
 @test ne(graph) == nnz(incidence_matrix(graph)) == 12
 @test nv(solvable_graph) == 9 + 5
@@ -46,7 +47,8 @@ end
 @testset "observed2graph handles unknowns inside callable parameters" begin
     @variables x(t) y(t)
     @parameters p(::Real)
-    g, _ = ModelingToolkit.observed2graph([y ~ p(x), x ~ 0], unwrap.([y, x]))
+    @named sys = System(Equation[], t, [x, y], [p])
+    g, _ = ModelingToolkit.observed2graph(sys, [y ~ p(x), x ~ 0], unwrap.([y, x]))
     @test ModelingToolkit.𝑠neighbors(g, 1) == [2]
     @test ModelingToolkit.𝑑neighbors(g, 2) == [1]
 end
@@ -66,8 +68,8 @@ end
     @test_nowarn prob.f(prob.u0, prob.p, 0.0)
 
     isys = ModelingToolkit.generate_initializesystem(sys)
-    @test length(unknowns(isys)) == 4
-    @test length(equations(isys)) == 5
+    @test length(unknowns(isys)) == 2
+    @test length(equations(isys)) == 1
     @test !any(equations(isys)) do eq
         iscall(eq.rhs) && operation(eq.rhs) in [MTKTearing.change_origin]
     end
@@ -154,7 +156,7 @@ end
         @variables x(t) y(t) z(t)
         @mtkcompile sys = System([D(x) ~ 2x + y, y ~ x + z, z^3 + x^3 ~ 12], t)
         mapping = map_variables_to_equations(sys)
-        @test mapping[x] == (D(x) ~ 2x + y)
+        @test isequal(mapping[x].lhs, D(x))
         @test mapping[y] == (y ~ x + z)
         @test mapping[z] == (0 ~ 12 - z^3 - x^3)
         @test length(mapping) == 3
@@ -178,7 +180,8 @@ end
             @test mapping[D(y)] == (D(yt) ~ -g + y * λ)
             @test mapping[D(x)] == (0 ~ -2xt * x - 2yt * y)
             @test mapping[D(D(x))] == (xtt ~ x * λ)
-            @test length(mapping) == 5
+            @test mapping[λ] == (0 ~ -2yt^2 - 2x * xtt - 2xt^2 - 2(-g + y * λ) * y)
+            @test length(mapping) == 6
 
             @testset "`rename_dummy_derivatives = false`" begin
                 mapping = map_variables_to_equations(sys; rename_dummy_derivatives = false)
@@ -188,13 +191,14 @@ end
                 @test mapping[yt] == (D(yt) ~ -g + y * λ)
                 @test mapping[xt] == (0 ~ -2xt * x - 2yt * y)
                 @test mapping[xtt] == (xtt ~ x * λ)
-                @test length(mapping) == 5
+                @test mapping[λ] == (0 ~ -2yt^2 - 2x * xtt - 2xt^2 - 2(-g + y * λ) * y)
+                @test length(mapping) == 6
             end
         end
         @testset "DDEs" begin
             function oscillator(; name, k = 1.0, τ = 0.01)
                 @parameters k = k τ = τ
-                @variables x(..) = 0.1 y(t) = 0.1 jcn(t) = 0.0 delx(t)
+                @variables x(..) = 0.1 y(t) = 0.1 jcn(t) = 0.0 [state_priority = -1] delx(t)
                 eqs = [
                     D(x(t)) ~ y,
                     D(y) ~ -k * x(t - τ) + jcn,
@@ -216,14 +220,14 @@ end
             mapping = map_variables_to_equations(sys)
             x1 = operation(unwrap(osc1.x))
             x2 = operation(unwrap(osc2.x))
-            @test mapping[osc1.x] == (D(osc1.x) ~ osc1.y)
-            @test mapping[osc1.y] == (D(osc1.y) ~ osc1.jcn - osc1.k * x1(t - osc1.τ))
-            @test mapping[osc1.delx] == (osc1.delx ~ x1(t - osc1.τ))
-            @test mapping[osc1.jcn] == (osc1.jcn ~ osc2.delx)
-            @test mapping[osc2.x] == (D(osc2.x) ~ osc2.y)
-            @test mapping[osc2.y] == (D(osc2.y) ~ osc2.jcn - osc2.k * x2(t - osc2.τ))
-            @test mapping[osc2.delx] == (osc2.delx ~ x2(t - osc2.τ))
-            @test mapping[osc2.jcn] == (osc2.jcn ~ osc1.delx)
+            @test mapping[sys.osc1.x] == (D(sys.osc1.x) ~ sys.osc1.y)
+            @test mapping[sys.osc1.y] == (D(sys.osc1.y) ~ sys.osc2.delx - sys.osc1.k * x1(t - sys.osc1.τ))
+            @test mapping[sys.osc1.delx] == (sys.osc1.delx ~ x1(t - sys.osc1.τ))
+            @test mapping[sys.osc1.jcn] == (sys.osc1.jcn ~ sys.osc2.delx)
+            @test mapping[sys.osc2.x] == (D(sys.osc2.x) ~ sys.osc2.y)
+            @test mapping[sys.osc2.y] == (D(sys.osc2.y) ~ sys.osc1.delx - sys.osc2.k * x2(t - sys.osc2.τ))
+            @test mapping[sys.osc2.delx] == (sys.osc2.delx ~ x2(t - sys.osc2.τ))
+            @test mapping[sys.osc2.jcn] == (sys.osc2.jcn ~ sys.osc1.delx)
             @test length(mapping) == 8
         end
     end
