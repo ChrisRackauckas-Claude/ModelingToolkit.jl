@@ -1145,8 +1145,9 @@ end
 Apply function `f` to each variable in expression `ex`. `f` should be a function that takes
 a variable and returns the replacement to use. A "variable" in this context refers to a
 symbolic quantity created directly from a variable creation macro such as
-[`Symbolics.@variables`](@ref), [`@independent_variables`](@ref), [`@parameters`](@ref),
-[`@constants`](@ref) or [`@brownians`](@ref).
+[`@variables`](https://docs.sciml.ai/Symbolics/stable/manual/variables/#Symbolics.@variables),
+[`@independent_variables`](@ref), [`@parameters`](@ref), [`@constants`](@ref) or
+[`@brownians`](@ref).
 """
 apply_to_variables(f, ex) = _apply_to_variables(f, ex)
 apply_to_variables(f, ex::Num) = wrap(_apply_to_variables(f, unwrap(ex)))
@@ -3587,12 +3588,14 @@ function parse_variable(sys::AbstractSystem, str::AbstractString)
     sym = nothing
     # This case handles when `sys` is a flattened system without a parent
     for v in get_unknowns(sys)
+        v = split_indexed_var(v)[1]
         if hasname(v) && getname(v) === sym_name
             sym = v
             break
         end
     end
     for v in get_ps(sys)
+        v = split_indexed_var(v)[1]
         if hasname(v) && getname(v) === sym_name
             sym = v
             break
