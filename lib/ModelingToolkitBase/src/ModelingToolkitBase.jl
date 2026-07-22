@@ -150,6 +150,11 @@ abstract type AbstractSystem end
 # See `deprecations.jl`.
 abstract type IntermediateDeprecationSystem <: AbstractSystem end
 
+"""
+    independent_variable(x)
+
+Return the independent variable associated with `x`.
+"""
 function independent_variable end
 
 # this has to be included early to deal with dependency issues
@@ -251,6 +256,34 @@ const t_nounits = let
 end
 const D_nounits = Differential(t_nounits)
 
+@doc """
+    t
+
+Default independent variable with units.
+"""
+t
+
+@doc """
+    D
+
+Default differential operator with respect to [`t`](@ref).
+"""
+D
+
+@doc """
+    t_nounits
+
+Default independent variable without units.
+"""
+t_nounits
+
+@doc """
+    D_nounits
+
+Default differential operator with respect to [`t_nounits`](@ref).
+"""
+D_nounits
+
 export CompilerOptions
 export ODEFunction, convert_system_indepvar,
     System, OptimizationSystem, JumpSystem, SDESystem, NonlinearSystem, ODESystem
@@ -291,6 +324,7 @@ export SymScope, LocalScope, ParentScope, GlobalScope
 export independent_variable, equations, observed, full_equations, jumps, cost,
     brownians
 export initialization_equations, guesses, bindings, initial_conditions, hierarchy
+export set_defaults
 export state_priorities, irreducibles, maybe_zeros
 export mtkcompile, expand_connections, structural_simplify
 export solve

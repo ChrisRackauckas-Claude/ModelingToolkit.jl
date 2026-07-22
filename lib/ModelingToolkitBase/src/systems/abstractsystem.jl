@@ -474,37 +474,31 @@ Base.show(io::IO, x::Initial) = print(io, "Initial")
 distribute_shift_into_operator(::Initial) = false
 validate_operator(::Initial, args, iv; context = nothing) = true
 
-function (f::Initial)(x)
-    # wrap output if wrapped input
-    iw = Symbolics.iswrapped(x)
-    x = unwrap(x)
+(f::Initial)(x) = x
+(f::Initial)(x::Num) = Num(f(unwrap(x)))
+(f::Initial)(x::Symbolics.Arr{T, N}) where {T, N} = Symbolics.Arr{T, N}(f(unwrap(x)))
+function (f::Initial)(x::SymbolicT)
     # non-symbolic values don't change
-    if symbolic_type(x) == NotSymbolic()
-        return x
+    Moshi.Match.@match x begin
+        BSImpl.Const() => return x
+        BSImpl.Term(; f) => if f isa Union{Differential, Shift}
+            # differential variables are default-toterm-ed
+            x = default_toterm(x)
+        elseif f isa Initial
+            # don't double wrap
+            return x
+        end
+        _ => nothing
     end
-    # differential variables are default-toterm-ed
-    if iscall(x) && operation(x) isa Union{Differential, Shift}
-        x = default_toterm(x)
-    end
-    # don't double wrap
-    iscall(x) && operation(x) isa Initial && return x
-    sh = SU.shape(x)
-    result = if SU.is_array_shape(sh)
-        term(f, x; type = symtype(x), shape = sh)
-    elseif iscall(x) && operation(x) === getindex
+    arr, isidx = split_indexed_var(x)
+    if isidx
         # instead of `Initial(x[1])` create `Initial(x)[1]`
         # which allows parameter indexing to handle this case automatically.
-        arr = arguments(x)[1]
-        f(arr)[arguments(x)[2:end]...]
-    else
-        term(f, x; type = symtype(x), shape = sh)
+        sidx = get_stable_index(x)
+        return f(arr)[sidx]
     end
     # the result should be a parameter
-    result = toparam(result)
-    if iw
-        result = wrap(result)
-    end
-    return result
+    return toparam(BSImpl.Term{VartypeT}(f, Symbolics.SArgsT((x,)); type = symtype(x), shape = SU.shape(x)))
 end
 
 supports_initialization(sys::AbstractSystem) = true
@@ -1348,8 +1342,9 @@ function namespace_equations(sys::AbstractSystem, visitor = NoVisitor())
     if eqs === get_eqs(sys)
         eqs = copy(eqs)
     end
+    cache = Base.IdDict{SymbolicT, SymbolicT}()
     for i in eachindex(eqs)
-        eqs[i] = namespace_equation(eqs[i], sys)
+        eqs[i] = namespace_equation(eqs[i], sys; cache)
     end
     return eqs
 end
@@ -1359,7 +1354,8 @@ function namespace_initialization_equations(
     )
     eqs = initialization_equations(sys)
     isempty(eqs) && return Equation[]
-    return map(eq -> namespace_equation(eq, sys; ivs), eqs)
+    cache = Base.IdDict{SymbolicT, SymbolicT}()
+    return map(eq -> namespace_equation(eq, sys; cache, ivs), eqs)
 end
 
 function namespace_tstops(sys::AbstractSystem)
@@ -1379,10 +1375,11 @@ function namespace_equation(
         eq::Equation,
         sys,
         n = nameof(sys);
+        cache = Base.IdDict{SymbolicT, SymbolicT}(),
         ivs = independent_variables(sys)
     )
-    _lhs = namespace_expr(eq.lhs, sys, n; ivs)
-    _rhs = namespace_expr(eq.rhs, sys, n; ivs)
+    _lhs = namespace_expr(eq.lhs, sys, n; cache, ivs)
+    _rhs = namespace_expr(eq.rhs, sys, n; cache, ivs)
     return (_lhs ~ _rhs)::Equation
 end
 
@@ -1460,38 +1457,48 @@ end
 function namespace_expr(O::Union{Num, Symbolics.Arr, Symbolics.CallAndWrap}, sys::AbstractSystem, n::Symbol = nameof(sys); kw...)
     return typeof(O)(namespace_expr(unwrap(O), sys, n; kw...))
 end
-function namespace_expr(O::AbstractArray, sys::AbstractSystem, n::Symbol = nameof(sys); ivs = independent_variables(sys))
+function namespace_expr(O::AbstractArray, sys::AbstractSystem, n::Symbol = nameof(sys); cache = Base.IdDict{SymbolicT, SymbolicT}(), ivs = independent_variables(sys))
     is_array_of_symbolics(O) || return O
     O = copy(O)
     for i in eachindex(O)
-        O[i] = namespace_expr(O[i], sys, n; ivs)
+        O[i] = namespace_expr(O[i], sys, n; cache, ivs)
     end
     return O
 end
-function namespace_expr(O::AbstractDict, sys::AbstractSystem, n::Symbol = nameof(sys); kw...)
+function namespace_expr(O::AbstractDict, sys::AbstractSystem, n::Symbol = nameof(sys); cache = Base.IdDict{SymbolicT, SymbolicT}(), ivs = independent_variables(sys))
     O2 = empty(O)
     for (k, v) in O
-        O2[namespace_expr(k, sys, n; kw...)] = namespace_expr(v, sys, n; kw...)
+        vv = namespace_expr(v, sys, n; cache, ivs)
+        kk = namespace_expr(k, sys, n; cache, ivs)
+        if O isa AtomicArrayDict
+            __unsafe_aad_setindex!(O2, vv, kk)
+        else
+            O2[kk] = vv
+        end
     end
     return O2
 end
-function namespace_expr(O::AbstractSet, sys::AbstractSystem, n::Symbol = nameof(sys); kw...)
+function namespace_expr(O::AbstractSet, sys::AbstractSystem, n::Symbol = nameof(sys); cache = Base.IdDict{SymbolicT, SymbolicT}(), kw...)
     O2 = empty(O)
     for v in O
-        push!(O2, namespace_expr(v, sys, n; kw...))
+        push!(O2, namespace_expr(v, sys, n; cache, kw...))
     end
     return O2
 end
-function namespace_expr(O::SymbolicT, sys::AbstractSystem, n::Symbol = nameof(sys); ivs = independent_variables(sys))
+function namespace_expr(O::SymbolicT, sys::AbstractSystem, n::Symbol = nameof(sys); cache = Base.IdDict{SymbolicT, SymbolicT}(), ivs = independent_variables(sys))
     any(isequal(O), ivs) && return O
+    cached = get(cache, O, nothing)
+    if cached !== nothing
+        return cached
+    end
     isvar = isvariable(O)
     return Moshi.Match.@match O begin
-        BSImpl.Const() => return O
-        BSImpl.Sym() => return isvar ? renamespace(n, O) : O
+        BSImpl.Const() => (return cache[O] = O)
+        BSImpl.Sym() => (return cache[O] = (isvar ? renamespace(n, O) : O))
         BSImpl.Term(; f, args, metadata, type, shape) => begin
             newargs = copy(parent(args))
             for i in eachindex(args)
-                newargs[i] = namespace_expr(newargs[i], sys, n; ivs)
+                newargs[i] = namespace_expr(newargs[i], sys, n; cache, ivs)
             end
             if isvar
                 rescoped = renamespace(n, O)
@@ -1503,27 +1510,27 @@ function namespace_expr(O::SymbolicT, sys::AbstractSystem, n::Symbol = nameof(sy
             else
                 meta = metadata
             end
-            return BSImpl.Term{VartypeT}(f, newargs; type, shape, metadata = meta)
+            return cache[O] = BSImpl.Term{VartypeT}(f, newargs; type, shape, metadata = meta)
         end
         BSImpl.AddMul(; coeff, dict, variant, type, shape, metadata) => begin
             newdict = copy(dict)
             empty!(newdict)
             for (k, v) in dict
-                newdict[namespace_expr(k, sys, n; ivs)] = v
+                newdict[namespace_expr(k, sys, n; cache, ivs)] = v
             end
-            return BSImpl.AddMul{VartypeT}(coeff, newdict, variant; type, shape, metadata)
+            return cache[O] = BSImpl.AddMul{VartypeT}(coeff, newdict, variant; type, shape, metadata)
         end
         BSImpl.Div(; num, den, type, shape, metadata) => begin
-            num = namespace_expr(num, sys, n; ivs)
-            den = namespace_expr(den, sys, n; ivs)
-            return BSImpl.Div{VartypeT}(num, den, false; type, shape, metadata)
+            num = namespace_expr(num, sys, n; cache, ivs)
+            den = namespace_expr(den, sys, n; cache, ivs)
+            return cache[O] = BSImpl.Div{VartypeT}(num, den, false; type, shape, metadata)
         end
         BSImpl.ArrayOp(; output_idx, expr, term, ranges, reduce, type, shape, metadata) => begin
             if term isa SymbolicT
-                term = namespace_expr(term, sys, n; ivs)
+                term = namespace_expr(term, sys, n; cache, ivs)
             end
-            expr = namespace_expr(expr, sys, n; ivs)
-            return BSImpl.ArrayOp{VartypeT}(output_idx, expr, reduce, term, ranges; type, shape, metadata)
+            expr = namespace_expr(expr, sys, n; cache, ivs)
+            return cache[O] = BSImpl.ArrayOp{VartypeT}(output_idx, expr, reduce, term, ranges; type, shape, metadata)
         end
     end
 end
@@ -1783,6 +1790,77 @@ end
 """
     $TYPEDSIGNATURES
 
+Given `sys` and an iterable of `name => value` pairs (e.g. from keyword arguments or a
+`Dict`), resolve each `name` to the corresponding unknown/parameter/variable of `sys` and
+update its default. This follows the same semantics as providing the value via variable
+metadata, i.e. `@variables var(t) = value`:
+
+  - If `value` is `nothing`, any existing binding/initial condition for the variable is
+    removed.
+  - If `value` is `missing`, the variable is recorded as having a `missing` binding (see
+    the corresponding semantics of `@parameters par = missing`).
+  - If `value` is symbolic, the variable is recorded as being bound to it (see
+    [`bindings`](@ref)).
+  - Otherwise, `value` is recorded as the variable's initial condition (see
+    [`initial_conditions`](@ref)).
+
+`name` can be a `Symbol`, a `String`, or a symbolic variable of `sys`. `Symbol`/`String`
+names may use `NAMESPACE_SEPARATOR` (`₊`) or `.` to refer to a variable owned by a
+subsystem of `sys`, e.g. `:inner₊x`. Names are resolved relative to `sys` itself, so they
+should _not_ be prefixed with the name of `sys`.
+
+Returns a new system with the same equations/variables as `sys`, but with the bindings and
+initial conditions updated according to `pairs`. Does not mutate `sys`.
+"""
+function set_defaults(sys::AbstractSystem, pairs)
+    pairs = collect(pairs)
+    isempty(pairs) && return sys
+
+    ics = copy(get_initial_conditions(sys))
+    binds = copy(parent(get_bindings(sys)))
+    for (name, val) in pairs
+        var = unwrap(_set_defaults_resolve_name(sys, name))
+        delete!(ics, var)
+        delete!(binds, var)
+        # `val`/`u` may already be hash-consed constant nodes wrapping `nothing`/`missing`
+        # (e.g. because `val` was promoted to `Num` by sitting in a homogeneous collection
+        # alongside other symbolic values), so compare against both the raw singleton and
+        # its symbolic form, and otherwise classify by structure (is it a literal
+        # constant, once unwrapped?) rather than by the static type of `val` itself.
+        u = unwrap(val)
+        if u === nothing || u === COMMON_NOTHING
+            continue
+        elseif u === missing || u === COMMON_MISSING
+            binds[var] = COMMON_MISSING
+        elseif u isa SymbolicT && !SU.isconst(u)
+            binds[var] = u
+        else
+            ics[var] = u isa SymbolicT ? u : SConst(u)
+        end
+    end
+
+    @set! sys.initial_conditions = ics
+    @set! sys.bindings = ROSymmapT(binds)
+    # the cached dependency graph is stale now that bindings have changed
+    @set! sys.parameter_bindings_graph = nothing
+    return sys
+end
+
+# The first path segment names a variable/subsystem owned directly by `sys`, so it must be
+# resolved *without* namespacing to match the flat (un-namespaced) keys used in
+# `get_initial_conditions`/`get_bindings`; subsequent segments descend into an
+# already-resolved subsystem, which namespaces normally, accumulating the qualified name
+# (e.g. `inner₊x`) that matches how a parent's `bindings`/`initial_conditions` merges in
+# namespaced entries from its subsystems. `toggle_namespacing` only affects `sys` itself
+# (not its subsystems), so this is exactly what `parse_variable` needs to do the right
+# thing at every level without reimplementing its name/derivative/array-index parsing.
+_set_defaults_resolve_name(sys::AbstractSystem, name::Union{Symbol, AbstractString}) =
+    parse_variable(toggle_namespacing(sys, false), string(name))
+_set_defaults_resolve_name(sys::AbstractSystem, name) = name
+
+"""
+    $TYPEDSIGNATURES
+
 Get the state priorities of a system `sys` and its subsystems.
 """
 function state_priorities(sys::AbstractSystem)
@@ -1796,6 +1874,11 @@ function state_priorities(sys::AbstractSystem)
     return sps
 end
 
+"""
+    $TYPEDSIGNATURES
+
+Get the irreducible variables of a system `sys` and its subsystems.
+"""
 function irreducibles(sys::AbstractSystem)
     ircs = get_irreducibles(sys)
     systems = get_systems(sys)
@@ -1807,6 +1890,11 @@ function irreducibles(sys::AbstractSystem)
     return ircs
 end
 
+"""
+    $TYPEDSIGNATURES
+
+Get the variables that should be treated as possible zeros in `sys` and its subsystems.
+"""
 function maybe_zeros(sys::AbstractSystem)
     dds = get_maybe_zeros(sys)
     systems = get_systems(sys)
@@ -1828,7 +1916,7 @@ parameters(sys::AbstractSystem, v::Symbolics.Arr) = toparam(unknowns(sys, v))
 parameters(sys::Union{AbstractSystem, Nothing}, v) = toparam(unknowns(sys, v))
 for f in [:unknowns, :parameters]
     @eval function $f(sys::AbstractSystem, vs::AbstractArray)
-        return map(v -> $f(sys, v), vs)
+        return namespace_expr(vs, sys)
     end
 end
 
@@ -2256,24 +2344,9 @@ struct ObservedFunctionCache{S, O}
     optimize::O
 end
 
-function ObservedFunctionCache(
-        sys; expression = Val{false}, steady_state = false, eval_expression = false,
-        eval_module = @__MODULE__, checkbounds = true, optimize = nothing,
-    )
-    return if expression == Val{true}
-        :(
-            $ObservedFunctionCache(
-                $sys, Dict(), $steady_state, $eval_expression,
-                $eval_module, $checkbounds, $optimize
-            )
-        )
-    else
-        ObservedFunctionCache(
-            sys, Dict(), steady_state, eval_expression, eval_module, checkbounds,
-            optimize,
-        )
-    end
-end
+# Constructors (taking a `GeneratedFunctionOptions` directly, and a backward-compatible
+# keyword wrapper around it) are defined in `codegen_utils.jl`, since they need
+# `GeneratedFunctionOptions` to already exist.
 
 # This is hit because ensemble problems do a deepcopy
 function Base.deepcopy_internal(ofc::ObservedFunctionCache, stackdict::IdDict)
@@ -3510,16 +3583,36 @@ function parse_variable(sys::AbstractSystem, str::AbstractString)
         str = _string_view_inner(str, 0, 2 + length(iv))
     end
 
-    cur = sys
-    for ident in eachsplit(str, ('.', NAMESPACE_SEPARATOR))
-        ident = Symbol(ident)
-        hasproperty(cur, ident) ||
-            throw(ArgumentError("System $(nameof(cur)) does not have a subsystem/variable named $(ident)"))
-        cur = getproperty(cur, ident)
+    sym_name = Symbol(str)
+    sym = nothing
+    # This case handles when `sys` is a flattened system without a parent
+    for v in get_unknowns(sys)
+        if hasname(v) && getname(v) === sym_name
+            sym = v
+            break
+        end
+    end
+    for v in get_ps(sys)
+        if hasname(v) && getname(v) === sym_name
+            sym = v
+            break
+        end
+    end
+    if sym === nothing
+        cur = sys
+        for ident in eachsplit(str, ('.', NAMESPACE_SEPARATOR))
+            ident = Symbol(ident)
+            hasproperty(cur, ident) ||
+                throw(ArgumentError("System $(nameof(cur)) does not have a subsystem/variable named $(ident)"))
+            cur = getproperty(cur, ident)
+        end
+    else
+        cur = sym
     end
 
     if arr_idxs !== nothing
-        cur = cur[arr_idxs...]
+        sidx = SU.StableIndex(arr_idxs)
+        cur = cur[sidx]
     end
 
     for i in 1:(derivative_level + dummyderivative_level)
