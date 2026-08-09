@@ -113,6 +113,7 @@ end
         @safetestset "SymbolicIndexingInterface test" include("symbolic_indexing_interface.jl")
         @safetestset "SciML Problem Input Test" include("sciml_problem_inputs.jl")
         @safetestset "MTKParameters Test" include("mtkparameters.jl")
+        @safetestset "Opaque MTKParameters Test" include("opaque_mtkparameters.jl")
     end
 
     if GROUP == "All" || GROUP == "Extended"
@@ -133,6 +134,7 @@ end
         @safetestset "HomotopyContinuation Extension Test" include("extensions/homotopy_continuation.jl")
         @safetestset "LabelledArrays Test" include("extensions/labelledarrays.jl")
         @safetestset "BifurcationKit Extension Test" include("extensions/bifurcationkit.jl")
+        @safetestset "Opaque MTKParameters AD Test" include("extensions/opaque_mtkparameters_ad.jl")
         # @safetestset "Auto Differentiation Test" include("extensions/ad.jl")
     end
 
