@@ -7,6 +7,7 @@ using ModelingToolkitBase: SymbolicContinuousCallback,
     D_nounits as D,
     affects, affect_negs, system, observed, AffectSystem
 import DiffEqNoiseProcess
+using Symbolics
 
 using StableRNGs
 import SciMLBase
@@ -722,7 +723,7 @@ end
     @named trigsys = System(eqs, t; continuous_events = [evt1, evt2])
     trigsys_ss = mtkcompile(trigsys)
     prob = ODEProblem(trigsys_ss, [], (0.0, 2π))
-    sol = solve(prob, Tsit5())
+    sol = solve(prob, Tsit5(); dtmax = 0.01)
     required_crossings_c1 = [π / 2, 3 * π / 2]
     required_crossings_c2 = [π / 6, π / 2, 5 * π / 6, 7 * π / 6, 3 * π / 2, 11 * π / 6]
     @test maximum(abs.(first.(cr1) .- required_crossings_c1)) < 1.0e-4
@@ -841,7 +842,7 @@ end
     @named trigsys = System(eqs, t; continuous_events = [evt1, evt2])
     trigsys_ss = mtkcompile(trigsys)
     prob = ODEProblem(trigsys_ss, [], (0.0, 2π))
-    sol = solve(prob, Tsit5())
+    sol = solve(prob, Tsit5(); dtmax = 0.01)
     @test maximum(abs.(first.(cr1) .- required_crossings_c1)) < 1.0e-4
     @test maximum(abs.(first.(cr2) .- required_crossings_c2)) < 1.0e-4
     @test sign.(cos.(required_crossings_c1 .- 1.0e-6)) == sign.(last.(cr1))
@@ -861,7 +862,7 @@ end
     @named trigsys = System(eqs, t; continuous_events = [evt2, evt1])
     trigsys_ss = mtkcompile(trigsys)
     prob = ODEProblem(trigsys_ss, [], (0.0, 2π))
-    sol = solve(prob, Tsit5())
+    sol = solve(prob, Tsit5(); dtmax = 0.01)
     @test maximum(abs.(first.(cr1) .- required_crossings_c1)) < 1.0e-4
     @test maximum(abs.(first.(cr2) .- required_crossings_c2)) < 1.0e-4
     @test sign.(cos.(required_crossings_c1 .- 1.0e-6)) == sign.(last.(cr1))
@@ -1939,5 +1940,27 @@ if !@isdefined(ModelingToolkit)
             @test sol.discretes[1].t ≈ 0.05:0.1:1.0
             @test sol[d] ≈ 1:10
         end
+    end
+
+    vlk(v, i) = v[clamp(round(Int, i), 1, length(v))]
+    @register_symbolic vlk(v::AbstractVector, i::Real)
+
+    @testset "Issue#4870: Negative-edge affects are properly saved" begin
+        # Case 1 of the issue
+        gi = only(@discretes gi(t) = 1.0)
+        ps = @parameters begin
+            (up[1:3] = [1.0, 2.0, 1.0e6])
+            (dn[1:3] = [-1.0e6, 0.5, 1.5])
+        end
+        upv, dnv = ps
+        @variables y(t) = 0.0
+        eqs = [D(y) ~ ifelse(t < 6, 0.5, -0.5)]   # triangle: 0 -> 3 -> 0
+
+        cbu = SymbolicContinuousCallback([y ~ vlk(upv, gi)], [gi => min(gi + 1, 3)]; affect_neg = nothing)
+        cbd = SymbolicContinuousCallback([y ~ vlk(dnv, gi)], nothing; affect_neg = [gi => max(gi - 1, 1)])
+        @named sys = System(eqs, t, [y], [collect(Iterators.flatten(ps)); gi]; continuous_events = [cbu, cbd])
+        s = mtkcompile(sys)
+        sol = solve(ODEProblem(s, [], (0.0, 12.0)), Tsit5())
+        @test sol[gi] ≈ [1, 2, 3, 2, 1]
     end
 end

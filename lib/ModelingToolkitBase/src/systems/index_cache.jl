@@ -378,7 +378,9 @@ function get_observed_and_dependent_to_timeseries(
         timeseries = TimeseriesSetType()
         for v in varsbuf
             arrv, _ = split_indexed_var(v)
-            if (idx = get(disc_idxs, v, nothing)) !== nothing
+            if isequal(v, get_iv(sys)::SymbolicT)
+                push!(timeseries, ContinuousTimeseries())
+            elseif (idx = get(disc_idxs, v, nothing)) !== nothing
                 push!(timeseries, idx.clock_idx)
             elseif (idx = get(disc_idxs, arrv, nothing)) !== nothing
                 push!(timeseries, idx.clock_idx)
@@ -426,14 +428,59 @@ function insert_by_type!(buffers::Vector{SymbolicT}, sym::SymbolicT, ::TypeT)
     return push!(buffers, sym)
 end
 
+"""
+    $TYPEDSIGNATURES
+
+Check if a variable `sym` is of the form `foo(iv)`.
+"""
+function is_variable_like_symbolic(sym::SymbolicT, iv::SymbolicT)
+    return Moshi.Match.@match sym begin
+        BSImpl.Term(; f, args) => begin
+            return f isa SymbolicT && !SU.is_function_symbolic(f) &&
+                length(args) == 1 && isequal(args[1], iv)
+        end
+        _ => false
+    end
+end
+
 function parse_callbacks_for_discretes!(sys::AbstractSystem, events::Vector, disc_param_callbacks::Dict{SymbolicT, BitSet}, constant_buffers::Dict{TypeT, Set{SymbolicT}}, nonnumeric_buffers::Dict{TypeT, Set{SymbolicT}}, offset::Int)
+    discs = Set{SymbolicParam}()
+    affects = Union{AffectSystem, ImperativeAffect, Nothing}[]
     for (i, event) in enumerate(events)
-        discs = Set{SymbolicParam}()
-        affect = event.affect::Union{AffectSystem, ImperativeAffect, Nothing}
-        if affect isa AffectSystem || affect isa ImperativeAffect
-            union!(discs, discretes(affect))
-        elseif affect === nothing
-            continue
+        empty!(discs)
+        empty!(affects)
+        if event isa SymbolicContinuousCallback
+            push!(affects, event.affect)
+            push!(affects, event.affect_neg)
+        else
+            push!(affects, event.affect)
+        end
+        for affect in affects
+            if affect isa AffectSystem
+                union!(discs, discretes(affect))
+            elseif affect isa ImperativeAffect
+                syms = SymbolicT[]
+                for sym in modified(affect)
+                    sym = unwrap(sym)
+                    if sym isa SymbolicT
+                        push!(syms, sym)
+                    elseif sym isa AbstractArray
+                        append!(syms, Iterators.map(unwrap, sym))
+                    else
+                        error("Unhandled case in `ImperativeAffect`. Please open an issue in ModelingToolkit.jl")
+                    end
+                end
+                for sym in syms
+                    if is_parameter(sys, sym)
+                        push!(discs, sym)
+                    else
+                        arr, isarr = split_indexed_var(sym)
+                        if isarr && is_parameter(sys, arr)
+                            push!(discs, arr)
+                        end
+                    end
+                end
+            end
         end
 
         for sym in discs
@@ -447,8 +494,8 @@ function parse_callbacks_for_discretes!(sys::AbstractSystem, events::Vector, dis
             end
 
             # Only `foo(t)`-esque parameters can be saved
-            if iscall(sym) && length(arguments(sym)) == 1 &&
-                    isequal(only(arguments(sym)), get_iv(sys))
+            if is_variable_like_symbolic(sym, get_iv(sys)::SymbolicT) ||
+                    iscall(sym) && operation(sym) isa Hold
                 clocks = get!(BitSet, disc_param_callbacks, sym)
                 push!(clocks, i + offset)
             elseif is_variable_floatingpoint(sym)

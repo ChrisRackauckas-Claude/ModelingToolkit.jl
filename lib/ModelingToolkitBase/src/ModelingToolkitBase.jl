@@ -21,6 +21,10 @@ using PrecompileTools, Reexport
     import BandedMatrices: BandedMatrices, BandedMatrix, bandwidths
 end
 
+import SciMLBase
+import SciMLBase: diagnose_symbolic_instability
+using Printf: @sprintf
+
 import SymbolicUtils
 import SymbolicUtils as SU
 import SymbolicUtils: iscall, arguments, operation, maketerm, promote_symtype,
@@ -335,6 +339,7 @@ export calculate_jacobian, generate_jacobian, generate_rhs, generate_custom_func
 export calculate_control_jacobian, generate_control_jacobian
 export calculate_tgrad, generate_tgrad
 export generate_cost, calculate_cost_gradient, generate_cost_gradient
+export generate_trajectory
 export calculate_cost_hessian, generate_cost_hessian
 export calculate_massmatrix, generate_diffusion_function
 export stochastic_integral_transform
@@ -401,6 +406,7 @@ const set_scalar_metadata = setmetadata
 @public collect_var_to_name!, collect_vars!, eqtype_supports_collect_vars, hasdefault
 @public getdefault, setdefault, setguess, iscomplete, isparameter, modified_unknowns!
 @public renamespace, namespace_equations
+@public varmap_to_vars
 @public check_mutable_cache, store_to_mutable_cache!, should_invalidate_mutable_cache_entry
 @public convert_bindings_for_time_independent_system, get_w
 @public Both

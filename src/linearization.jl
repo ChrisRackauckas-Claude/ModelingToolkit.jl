@@ -139,7 +139,7 @@ function linearization_function(
         initialization_abstol = 1.0e-5,
         initialization_reltol = 1.0e-3,
         op = Dict{SymbolicT, SymbolicT}(),
-        p = DiffEqBase.NullParameters(),
+        p = SciMLBase.NullParameters(),
         zero_dummy_der = false,
         initialization_solver_alg = nothing,
         autodiff = AutoForwardDiff(),
@@ -747,7 +747,7 @@ function linearize_symbolic(
     h = build_explicit_observed_function(
         sys, outputs,
         GeneratedFunctionOptions(; expression = Val{false}, eval_expression, eval_module)
-    )
+    )::GeneratedFunctionWrapper
     if split
         dx = fun(sts, p, t)
         y = h(sts, p, t)
@@ -957,7 +957,7 @@ lsys_sym, _ = ModelingToolkit.linearize_symbolic(cl, [f.u], [p.x])
 function linearize(
         sys, lin_fun::LinearizationFunction; t = 0.0,
         op = Dict(), allow_input_derivatives = false,
-        p = DiffEqBase.NullParameters()
+        p = SciMLBase.NullParameters()
     )
     if op isa LinearizationOpPoint && op.t isa AbstractVector
         ops = _build_op_from_solution(op)
@@ -976,6 +976,7 @@ function linearize(
     _check_loop_opening_op(lin_fun.loop_opening_params, op)
     for (k, v) in op
         isequal(v, COMMON_NOTHING) && continue
+        v === COMMON_MISSING && continue
         v = _resolve_op_value(prob, v)
         if is_parameter(prob, Initial(k))
             setu(prob, Initial(k))(prob, v)

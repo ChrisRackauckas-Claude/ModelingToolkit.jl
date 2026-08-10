@@ -1,5 +1,48 @@
 get_iv(D::Differential) = D.x
 
+const SHOW_API_GUIDANCE = Ref(true)
+
+const EXPERIMENTAL_API_GUIDANCE_NOTE = """
+!!! warning "Experimental"
+
+    This is experimental and unsupported. It may change or be removed in any release,
+    without a breaking version bump. Verbosity across the SciML ecosystem is moving to
+    SciMLLogging.jl, and this setting is expected to be replaced by an option there once
+    ModelingToolkit adopts it.
+"""
+
+"""
+    $(TYPEDSIGNATURES)
+
+Whether error messages include guidance phrased in terms of the ModelingToolkit API. See
+[`show_api_guidance!`](@ref).
+
+$EXPERIMENTAL_API_GUIDANCE_NOTE
+"""
+show_api_guidance() = SHOW_API_GUIDANCE[]
+
+"""
+    $(TYPEDSIGNATURES)
+
+Set whether error messages include guidance phrased in terms of the ModelingToolkit API,
+such as which keyword argument of a problem constructor to pass, and return the previous
+setting.
+
+This is meant for front ends which present a modelling language of their own, in which
+advice to call `ODEProblem` or to pass `initialization_eqs` would send users looking for
+something their language does not have. Such a front end can call
+`show_api_guidance!(false)` once when it loads, and add guidance of its own. What went
+wrong is still described in full; only the part of the message which names ModelingToolkit
+functions and keyword arguments is left out.
+
+$EXPERIMENTAL_API_GUIDANCE_NOTE
+"""
+function show_api_guidance!(show::Bool)
+    old = SHOW_API_GUIDANCE[]
+    SHOW_API_GUIDANCE[] = show
+    return old
+end
+
 """
     $(TYPEDSIGNATURES)
 
@@ -936,6 +979,16 @@ function collect_vars!(
     return nothing
 end
 
+# Break the inference cycle between the mutually recursive collectors, which Julia
+# 1.10 can otherwise miscompile after unrelated method additions. Dispatching in the
+# latest world age also means a downstream `collect_vars!` method defined while this
+# call is already running is still found; because the four-argument fallback returns
+# `nothing`, missing it would silently drop parameters rather than error. The explicit
+# keyword preserves metadata recursion's depth-zero semantics.
+function _call_collect_vars!(unknowns, parameters, expr, iv)
+    return @invokelatest collect_vars!(unknowns, parameters, expr, iv; depth = 0)
+end
+
 """
     $(TYPEDSIGNATURES)
 
@@ -966,7 +1019,7 @@ function collect_var!(unknowns::OrderedSet{SymbolicT}, parameters::OrderedSet{Sy
                 any(!SU.isconst, Iterators.drop(arguments(var), 1))
         )
         for arg in Iterators.drop(arguments(var), 1)
-            collect_vars!(unknowns, parameters, arg, iv)
+            _call_collect_vars!(unknowns, parameters, arg, iv)
         end
         var = arr
     end
@@ -975,7 +1028,7 @@ function collect_var!(unknowns::OrderedSet{SymbolicT}, parameters::OrderedSet{Sy
     if iscalledparameter(var)
         callable = getcalledparameter(var)
         push!(parameters, callable)
-        collect_vars!(unknowns, parameters, arguments(var), iv)
+        _call_collect_vars!(unknowns, parameters, arguments(var), iv)
     elseif isparameter(var) || (iscall(var) && isparameter(operation(var)))
         push!(parameters, var)
     else
@@ -984,55 +1037,55 @@ function collect_var!(unknowns::OrderedSet{SymbolicT}, parameters::OrderedSet{Sy
     # Add also any parameters that appear only as defaults in the var
     if hasdefault(var) && (def = getdefault(var)) !== missing
         if def isa SymbolicT
-            collect_vars!(unknowns, parameters, def, iv)
+            _call_collect_vars!(unknowns, parameters, def, iv)
         elseif def isa Num
-            collect_vars!(unknowns, parameters, def, iv)
+            _call_collect_vars!(unknowns, parameters, def, iv)
         elseif def isa Arr{Num, 1}
-            collect_vars!(unknowns, parameters, def, iv)
+            _call_collect_vars!(unknowns, parameters, def, iv)
         elseif def isa Arr{Num, 2}
-            collect_vars!(unknowns, parameters, def, iv)
+            _call_collect_vars!(unknowns, parameters, def, iv)
         elseif def isa CallAndWrap{Num}
-            collect_vars!(unknowns, parameters, def, iv)
+            _call_collect_vars!(unknowns, parameters, def, iv)
         elseif def isa CallAndWrap{Arr{Num, 1}}
-            collect_vars!(unknowns, parameters, def, iv)
+            _call_collect_vars!(unknowns, parameters, def, iv)
         elseif def isa CallAndWrap{Arr{Num, 2}}
-            collect_vars!(unknowns, parameters, def, iv)
+            _call_collect_vars!(unknowns, parameters, def, iv)
         elseif def isa Arr
-            collect_vars!(unknowns, parameters, def, iv)
+            _call_collect_vars!(unknowns, parameters, def, iv)
         elseif def isa CallAndWrap
-            collect_vars!(unknowns, parameters, def, iv)
+            _call_collect_vars!(unknowns, parameters, def, iv)
         else
-            collect_vars!(unknowns, parameters, def, iv)
+            _call_collect_vars!(unknowns, parameters, def, iv)
         end
     end
     # Add also any parameters that appear only in the bounds of the var
     if hasbounds(var)
         (lo, hi) = getbounds(var)
         if lo isa SymbolicT
-            collect_vars!(unknowns, parameters, lo, iv)
+            _call_collect_vars!(unknowns, parameters, lo, iv)
         elseif lo isa Num
-            collect_vars!(unknowns, parameters, lo, iv)
+            _call_collect_vars!(unknowns, parameters, lo, iv)
         elseif lo isa Arr{Num, 1}
-            collect_vars!(unknowns, parameters, lo, iv)
+            _call_collect_vars!(unknowns, parameters, lo, iv)
         elseif lo isa Arr{Num, 2}
-            collect_vars!(unknowns, parameters, lo, iv)
+            _call_collect_vars!(unknowns, parameters, lo, iv)
         elseif lo isa Arr
-            collect_vars!(unknowns, parameters, lo, iv)
+            _call_collect_vars!(unknowns, parameters, lo, iv)
         else
-            collect_vars!(unknowns, parameters, lo, iv)
+            _call_collect_vars!(unknowns, parameters, lo, iv)
         end
         if hi isa SymbolicT
-            collect_vars!(unknowns, parameters, hi, iv)
+            _call_collect_vars!(unknowns, parameters, hi, iv)
         elseif hi isa Num
-            collect_vars!(unknowns, parameters, hi, iv)
+            _call_collect_vars!(unknowns, parameters, hi, iv)
         elseif hi isa Arr{Num, 1}
-            collect_vars!(unknowns, parameters, hi, iv)
+            _call_collect_vars!(unknowns, parameters, hi, iv)
         elseif hi isa Arr{Num, 2}
-            collect_vars!(unknowns, parameters, hi, iv)
+            _call_collect_vars!(unknowns, parameters, hi, iv)
         elseif hi isa Arr
-            collect_vars!(unknowns, parameters, hi, iv)
+            _call_collect_vars!(unknowns, parameters, hi, iv)
         else
-            collect_vars!(unknowns, parameters, hi, iv)
+            _call_collect_vars!(unknowns, parameters, hi, iv)
         end
     end
     return nothing
@@ -1192,13 +1245,26 @@ function is_numeric_symtype(T::Type)
 end
 
 """
+The concrete type of the graph returned by [`observed_dependency_graph`](@ref).
+"""
+const ObservedDependencyGraphT = DiCMOBiGraph{
+    false, Int, BipartiteGraph{Int, Nothing},
+    Matching{Unassigned, Vector{Union{Unassigned, Int}}},
+}
+
+"""
     $(TYPEDSIGNATURES)
 
 Return the `DiCMOBiGraph` denoting the dependencies between observed equations `eqs`.
 """
-function observed_dependency_graph(sys::AbstractSystem, eqs::Vector{Equation})
+function observed_dependency_graph(
+        sys::AbstractSystem, eqs::Vector{Equation}
+    )::ObservedDependencyGraphT
     graph, assigns = observed2graph(sys, eqs, getproperty.(eqs, (:lhs,)))
-    matching = complete(Matching(Vector{Union{Unassigned, Int}}(assigns)))
+    # The unassigned type parameter is given explicitly instead of letting `Matching`
+    # infer it from the eltype, since that inference is not part of a stable contract
+    # and has differed between `BipartiteGraphs` versions.
+    matching = complete(Matching{Unassigned}(Vector{Union{Unassigned, Int}}(assigns)))
     return DiCMOBiGraph{false}(graph, matching)
 end
 
@@ -1209,10 +1275,7 @@ function should_invalidate_mutable_cache_entry(::Type{ObservedGraphCacheKey}, pa
 end
 
 struct ObservedGraphCache
-    graph::DiCMOBiGraph{
-        false, Int, BipartiteGraph{Int, Nothing},
-        Matching{Unassigned, Vector{Union{Unassigned, Int}}},
-    }
+    graph::ObservedDependencyGraphT
     obsvar_to_idx::Dict{Any, Int}
 end
 

@@ -218,11 +218,11 @@ function _mtkcompile!(
     validate_io!(state, orig_inputs, inputs, discrete_inputs, outputs, disturbance_inputs)
     # ModelingToolkit.markio!(state, orig_inputs, inputs, outputs, disturbance_inputs)
     union!(inputs, disturbance_inputs)
-    state = ModelingToolkit.inputs_to_parameters!(state, discrete_inputs, OrderedSet{SymbolicT}())
-    state = ModelingToolkit.inputs_to_parameters!(state, inputs, outputs)
+    state = inputs_to_parameters!(state, discrete_inputs, OrderedSet{SymbolicT}())
+    state = inputs_to_parameters!(state, inputs, outputs)
     eliminate_perfect_aliases!(state)
     StateSelection.trivial_tearing!(state)
-    sys, mm = ModelingToolkit.alias_elimination!(state; fully_determined, kwargs...)
+    sys, mm = alias_elimination!(state; fully_determined, kwargs...)
     old_to_new_eq, old_to_new_var, aliases = eliminate_perfect_aliases!(state)
     sys = state.sys
     mm = StateSelection.get_new_mm(aliases, old_to_new_eq, old_to_new_var, mm)
@@ -244,8 +244,9 @@ function _mtkcompile!(
     sys = _mtkcompile_worker!(state, sys; fully_determined, dummy_derivative, kwargs...)
     fullunknowns = [observables(sys); unknowns(sys)]
     @set! sys.observed = MTKBase.topsort_equations(sys, observed(sys), fullunknowns)
+    sys = state.sys = MTKBase.invalidate_cache!(sys)
 
-    return MTKBase.invalidate_cache!(sys)
+    return sys
 end
 
 function _mtkcompile_worker!(
@@ -261,7 +262,7 @@ function _mtkcompile_worker!(
         var_eq_matching = StateSelection.pantelides!(state; finalize = false, kwargs...)
         sys = pantelides_reassemble(state, var_eq_matching)
         state = TearingState(sys)
-        sys, mm = ModelingToolkit.alias_elimination!(state; fully_determined, kwargs...)
+        sys, mm = alias_elimination!(state; fully_determined, kwargs...)
         state.mm = mm
         sys = ModelingToolkit.dummy_derivative(
             sys, state; fully_determined, kwargs...
@@ -308,6 +309,17 @@ struct DifferentiatedVariableNotUnknownError <: Exception
     undifferentiated::Any
 end
 
+"""
+    $TYPEDSIGNATURES
+
+Return how many levels above the current system a variable with the given `scope` becomes
+an unknown. `GlobalScope` returns `-1`, matching the sentinel used by
+[`ModelingToolkitBase.check_scope_depth`](@ref).
+"""
+expected_scope_depth(::LocalScope) = 0
+expected_scope_depth(::GlobalScope) = -1
+expected_scope_depth(scope::ParentScope) = expected_scope_depth(scope.parent)::Int + 1
+
 function Base.showerror(io::IO, err::DifferentiatedVariableNotUnknownError)
     undiff = err.undifferentiated
     diff = err.differentiated
@@ -315,7 +327,7 @@ function Base.showerror(io::IO, err::DifferentiatedVariableNotUnknownError)
         io,
         "Variable $undiff occurs differentiated as $diff but is not an unknown of the system."
     )
-    scope = getmetadata(undiff, SymScope, LocalScope())
+    scope = getmetadata(undiff, SymScope, LocalScope())::AllScopes
     depth = expected_scope_depth(scope)
     return if depth > 0
         print(

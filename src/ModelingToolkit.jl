@@ -16,10 +16,11 @@ end
 
 import SymbolicUtils
 import SymbolicUtils as SU
-import SymbolicUtils: iscall, arguments, operation, maketerm, promote_symtype,
+import SymbolicUtils: iscall, arguments, operation, promote_symtype,
     isadd, ismul, ispow, issym, FnType, isconst, BSImpl,
-    @rule, Rewriters, substitute, metadata, BasicSymbolic,
-    symtype
+    @rule, Rewriters, substitute, BasicSymbolic,
+    symtype, _iszero, _isone
+import TermInterface: maketerm, metadata
 using SymbolicUtils.Code
 import SymbolicUtils.Code: toexpr
 import SymbolicUtils.Rewriters: Chain, Postwalk, Prewalk, Fixpoint
@@ -31,6 +32,7 @@ using Graphs
 import OrderedCollections
 
 using SymbolicIndexingInterface
+using SymbolicIndexingInterface: getname
 using LinearAlgebra, SparseArrays
 using InteractiveUtils
 using DataStructures
@@ -56,12 +58,12 @@ using RuntimeGeneratedFunctions: drop_expr
 using Symbolics: degree, VartypeT, SymbolicT
 using Symbolics: parse_vars, value, @derivatives, get_variables,
     exprs_occur_in, symbolic_linear_solve, unwrap, wrap,
-    VariableSource, getname, variable, COMMON_ZERO,
+    VariableSource, variable, COMMON_ZERO,
     NAMESPACE_SEPARATOR, setdefaultval, Arr,
     hasnode, fixpoint_sub, CallAndWrap, SArgsT, SSym, STerm
 const NAMESPACE_SEPARATOR_SYMBOL = Symbol(NAMESPACE_SEPARATOR)
 import Symbolics: rename, get_variables!, _solve, hessian_sparsity,
-    jacobian_sparsity, isaffine, islinear, _iszero, _isone,
+    jacobian_sparsity, isaffine, islinear,
     tosymbol, lower_varname, diff2term, var_from_nested_derivative,
     BuildTargets, JuliaTarget, StanTarget, CTarget, MATLABTarget,
     ParallelForm, SerialForm, MultithreadedForm, build_function,
@@ -71,9 +73,11 @@ import Symbolics: rename, get_variables!, _solve, hessian_sparsity,
 import ModelingToolkitBase as MTKBase
 import SimpleNonlinearSolve
 
-import DiffEqBase: @add_kwonly
-@reexport using Symbolics
-@reexport using UnPack
+import SciMLBase: @add_kwonly
+using UnPack: @unpack
+# ModelingToolkitBase already `@reexport`s Symbolics and UnPack, so re-exporting them a
+# second time here would only duplicate that surface. The set of names ModelingToolkit
+# publicly re-exports is pinned by `REEXPORTED_API` in `test/qa/qa.jl`.
 @reexport using ModelingToolkitBase
 RuntimeGeneratedFunctions.init(@__MODULE__)
 
@@ -130,28 +134,29 @@ using ModelingToolkitBase: COMMON_SENTINEL, COMMON_NOTHING, COMMON_MISSING,
 using ModelingToolkitBase: build_function_wrapper, BuildFunctionWrapperOptions,
     GeneratedFunctionOptions
 
-@recompile_invalidations begin
-    include("linearization.jl")
-    include("systems/analysis_points.jl")
-    include("systems/solver_nlprob.jl")
+# `@recompile_invalidations` evaluates its body through `Core.eval` at run time, which
+# hides these files from static analyzers and resolves the relative paths against the
+# caller's source directory rather than `src/`. Keep the includes at real top level.
+include("linearization.jl")
+include("systems/analysis_points.jl")
+include("systems/solver_nlprob.jl")
 
-    include("problems/docs.jl")
-    include("systems/codegen.jl")
-    include("systems/codegen_compat.jl")
-    include("problems/semilinearodeproblem.jl")
-    include("problems/sccnonlinearproblem.jl")
+include("problems/docs.jl")
+include("systems/codegen.jl")
+include("systems/codegen_compat.jl")
+include("problems/semilinearodeproblem.jl")
+include("problems/sccnonlinearproblem.jl")
 
-    include("discretedomain.jl")
-    include("systems/systemstructure.jl")
-    include("initialization.jl")
-    include("systems/systems.jl")
-    include("systems/clock_inference.jl")
-    include("systems/if_lifting.jl")
-    include("systems/substitute_component.jl")
+include("discretedomain.jl")
+include("systems/systemstructure.jl")
+include("initialization.jl")
+include("systems/systems.jl")
+include("systems/clock_inference.jl")
+include("systems/if_lifting.jl")
+include("systems/substitute_component.jl")
 
-    include("systems/alias_elimination.jl")
-    include("structural_transformation/StructuralTransformations.jl")
-end
+include("systems/alias_elimination.jl")
+include("structural_transformation/StructuralTransformations.jl")
 
 @reexport using .StructuralTransformations
 
