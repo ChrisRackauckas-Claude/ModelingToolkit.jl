@@ -1098,10 +1098,19 @@ end
 
 # TODO: make this infer when the nonnumerics are non-trivial
 function (recon::MTKParametersReconstructor)(src, dst)
-    src_ps = parameter_values(src)
-    dst_ps = parameter_values(dst)
-    unwrapped_dst_ps = _unwrap_mtk_parameters(dst_ps)
-    oldcache = unwrapped_dst_ps.caches
+    return recon(src, parameter_values(dst))
+end
+
+function (recon::MTKParametersReconstructor)(
+        src, dst_ps::SciMLBase.DespecializedParameters
+    )
+    return SciMLBase.DespecializedParameters(
+        recon(src, SciMLBase.unwrap_parameters(dst_ps))
+    )
+end
+
+function (recon::MTKParametersReconstructor)(src, dst_ps::MTKParameters)
+    oldcache = dst_ps.caches
     # I don't know why but this makes it infer properly
     if recon.tunables_fn isa ComposedFunction
         tunablevals = recon.tunables_fn.outer(recon.tunables_fn.inner(src))
@@ -1109,7 +1118,7 @@ function (recon::MTKParametersReconstructor)(src, dst)
         tunablevals = recon.tunables_fn(src)
     end
     initialvals = recon.initials_fn(src)
-    nonnumerics = recon.nonnumerics_fn(src)::typeof(unwrapped_dst_ps.nonnumeric)
+    nonnumerics = recon.nonnumerics_fn(src)::typeof(dst_ps.nonnumeric)
     (; diffcache_buffer_idx) = recon
     if !iszero(diffcache_buffer_idx)
         @set! nonnumerics[diffcache_buffer_idx] = DiffCacheAllocatorAPIWrapper{ForwardDiff.valtype(eltype(initialvals))}.(nonnumerics[diffcache_buffer_idx])
@@ -1117,13 +1126,11 @@ function (recon::MTKParametersReconstructor)(src, dst)
     # This `convert` exists because a `Real` discrete might get its value from an
     # integer function of integer parameters/discretes. This ends up creating a
     # `BlockedArray{Int, ...}` instead of a `BlockedArray{Float64, ...}`.
-    new_ps = MTKParameters(
+    return MTKParameters(
         tunablevals, initialvals,
-        convert(typeof(unwrapped_dst_ps.discrete), recon.discretes_fn(src)),
+        convert(typeof(dst_ps.discrete), recon.discretes_fn(src)),
         recon.consts_fn(src), nonnumerics, oldcache isa Tuple{} ? () : copy.(oldcache)
     )
-    return dst_ps isa SciMLBase.DespecializedParameters ?
-        SciMLBase.DespecializedParameters(new_ps) : new_ps
 end
 
 """
@@ -1525,7 +1532,7 @@ function (siu::SetInitialUnknowns)(p::MTKParameters, u0)
 end
 
 function (siu::SetInitialUnknowns)(p::SciMLBase.DespecializedParameters, u0)
-    return SciMLBase.DespecializedParameters(siu(p.params, u0))
+    return SciMLBase.DespecializedParameters(siu(SciMLBase.unwrap_parameters(p), u0))
 end
 
 function (siu::SetInitialUnknowns)(p::AbstractVector, u0)
@@ -1872,7 +1879,7 @@ constructed is in implicit DAE form (`DAEProblem`). `opts.check_initialization_u
 function maybe_build_initialization_problem(
         sys::AbstractSystem, iip::Bool, op::SymmapT, t, guesses,
         opts::SciMLProblemOptions;
-        specialize = SciMLBase.AutoSpecialize,
+        specialize = SciMLBase.AutoDespecialize,
         # Intercept `expression` because we don't support it here yet
         expression = Val{false}, kwargs...
     )
@@ -2149,15 +2156,6 @@ Base.@nospecializeinfer function process_SciMLProblem(
     __process_SciMLProblem(constructor, sys, op, opts; kwargs...)
 end
 
-function maybe_despecialize_parameters(constructor, p)
-    return if p isa MTKParameters && constructor <: SciMLBase.AbstractSciMLFunction &&
-            SciMLBase.specialization(constructor) === SciMLBase.AutoSpecialize
-        SciMLBase.DespecializedParameters(p)
-    else
-        p
-    end
-end
-
 function __process_SciMLProblem(
         @nospecialize(constructor), sys::AbstractSystem, op::AnyDict,
         opts::SciMLProblemOptions; kwargs...
@@ -2315,7 +2313,6 @@ function __process_SciMLProblem(
         compiler_options,
         kwargs...
     )
-    p = maybe_despecialize_parameters(constructor, p)
     if return_operating_point
         return implicit_dae ? (f, du0, u0, p, op) : (f, u0, p, op)
     else
@@ -2485,7 +2482,7 @@ resolve_iip(::Type{Both}, @nospecialize(op)) = !(op isa StaticArray)
 
 Macro for writing problem/function constructors. Expects a function definition with type
 parameters for `iip` and `specialize`. Generates fallbacks with
-`specialize = SciMLBase.AutoSpecialize` and `iip = Both` (resolved at construction time).
+`specialize = SciMLBase.AutoDespecialize` and `iip = Both` (resolved at construction time).
 """
 # Unwrap `@nospecialize(arg)` to get the underlying argument expression.
 # Returns the argument unchanged if not wrapped in @nospecialize.
@@ -2558,9 +2555,9 @@ macro fallback_iip_specialize(ex)
     fnname_name, curly_args... = fnname_curly.args
     @assert curly_args == where_args
 
-    # callexpr_iip is `ODEProblem{iip, AutoSpecialize}(call_args...)`
+    # callexpr_iip is `ODEProblem{iip, AutoDespecialize}(call_args...)`
     callexpr_iip = Expr(
-        :call, Expr(:curly, fnname_name, curly_args[1], SciMLBase.AutoSpecialize), call_args...
+        :call, Expr(:curly, fnname_name, curly_args[1], SciMLBase.AutoDespecialize), call_args...
     )
     # `ODEProblem{iip}`
     fnname_iip = Expr(:curly, fnname_name, curly_args[1])
