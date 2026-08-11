@@ -47,6 +47,13 @@ of the interpolation arrays.
 Related to `JuMPDynamicOptProblem`, but directly adds the differential equations
 of the system as derivative constraints, rather than using a solver tableau.
 
+Each dynamics constraint is emitted as a residual scaled by the state's nominal
+value, `(∂x - tₛ*f(x)) / nominal ~ 0`, so that states of different magnitudes
+produce comparable residuals. The nominal value is taken from the variable's
+`nominal` metadata (see `getnominal`; `1.0` if unset) and can be overridden per
+state with the `nominal_values` keyword, a map from states to their typical
+magnitudes.
+
 To construct the problem, please load InfiniteOpt along with ModelingToolkitBase.
 """
 function InfiniteOptDynamicOptProblem end
@@ -68,6 +75,13 @@ Convert a System representing an optimal control system into a Pyomo model
 for solving using optimization. Must provide either `dt`, the timestep between collocation
 points (which, along with the timespan, determines the number of points), or directly
 provide the number of points as `steps`.
+
+Each dynamics constraint is emitted as a residual scaled by the state's nominal
+value, `(∂x - tₛ*f(x)) / nominal ~ 0`, so that states of different magnitudes
+produce comparable residuals. The nominal value is taken from the variable's
+`nominal` metadata (see `getnominal`; `1.0` if unset) and can be overridden per
+state with the `nominal_values` keyword, a map from states to their typical
+magnitudes.
 
 To construct the problem, please load Pyomo along with ModelingToolkitBase.
 """
@@ -318,13 +332,52 @@ end
 ##########################
 ### MODEL CONSTRUCTION ###
 ##########################
+
+# Collect the arity (number of call arguments) of every callable parameter that
+# appears in `expr`, e.g. `curvature(s)` or `forcing(t)`. Keyed by the bare
+# callable-parameter symbol (`default_toterm`ed to match `pmap` keys).
+function _collect_called_param_arities!(arities, expr)
+    expr = value(expr)
+    iscall(expr) || return arities
+    if iscalledparameter(expr)
+        arities[default_toterm(getcalledparameter(expr))] = length(arguments(expr))
+    end
+    for arg in arguments(expr)
+        _collect_called_param_arities!(arities, arg)
+    end
+    return arities
+end
+
+function callable_parameter_arities(sys)
+    arities = Dict{Any, Int}()
+    for eq in equations(sys)
+        _collect_called_param_arities!(arities, eq.lhs)
+        _collect_called_param_arities!(arities, eq.rhs)
+    end
+    for eq in observed(unhack_system(sys))
+        _collect_called_param_arities!(arities, eq.rhs)
+    end
+    cons = get_constraints(sys)
+    if cons !== nothing
+        for c in cons
+            _collect_called_param_arities!(arities, c.lhs)
+            _collect_called_param_arities!(arities, c.rhs)
+        end
+    end
+    for cost in get_costs(sys)
+        _collect_called_param_arities!(arities, cost)
+    end
+    return arities
+end
+
 function process_DynamicOptProblem(
         prob_type::Type{<:SciMLBase.AbstractDynamicOptProblem}, model_type, sys::System, op, tspan;
         dt = nothing,
         steps = nothing,
         tune_parameters = false,
         guesses = Dict(), initial_trajectory = Dict(),
-        bounds = Dict(),
+        nominal_values = Dict(),
+        bounds = Dict(), observed_bounds_method = :auto,
         eval_expression = false, eval_module = @__MODULE__,
         kwargs...
     )
@@ -336,6 +389,7 @@ function process_DynamicOptProblem(
     stidxmap = Dict([v => i for (i, v) in enumerate(states)])
     op = Dict([default_toterm(value(k)) => v for (k, v) in op])
     initial_trajectory = Dict([default_toterm(value(k)) => v for (k, v) in initial_trajectory])
+    nominal_values = Dict([default_toterm(value(k)) => v for (k, v) in nominal_values])
     bounds = Dict([default_toterm(value(k)) => v for (k, v) in bounds])
     u0_idxs = has_alg_eqs(sys) ? collect(1:length(states)) :
         [stidxmap[default_toterm(k)] for (k, v) in op if haskey(stidxmap, k)]
@@ -394,12 +448,36 @@ function process_DynamicOptProblem(
 
     merge!(pmap, Dict(tunable_params .=> P_syms))
 
-    set_variable_bounds!(fullmodel, sys, pmap, tspan[2], tunable_params, bounds)
+    # Register callable parameters and update MTKParameters for numerical tracing (e.g. JuMP).
+    # Any parameter called in the equations (`curvature(s)`, `forcing(t)`, ...) must become a
+    # solver operator so the backend can trace it symbolically; this covers both `FunctionWrapper`
+    # values and bare callables (e.g. a `DataInterpolations` object stored unwrapped).
+    arities = callable_parameter_arities(sys)
+    new_nonnumeric = Tuple(convert(Vector{Any}, copy(v)) for v in p.nonnumeric)
+    p = MTKParameters(p.tunable, p.initials, p.discrete, p.constant, new_nonnumeric, p.caches)
+    for (sym, val) in pmap
+        # Prefer the arity recorded from the call site; fall back to a `FunctionWrapper`'s own
+        # argument-tuple type. A parameter that is never called is left untouched.
+        dim = get(arities, sym) do
+            val isa FunctionWrapper ? fieldcount(typeof(val).parameters[2]) : nothing
+        end
+        dim === nothing && continue
+        reg_op = register_operator!(fullmodel, dim, val, nameof(sym))
+        pmap[sym] = reg_op
+        setp(sys, sym)(p, reg_op)
+    end
+    narrow_nn = Tuple(map(identity, v) for v in p.nonnumeric)
+    @set! p.nonnumeric = narrow_nn
+
+    set_variable_bounds!(fullmodel, sys, pmap, tspan, tunable_params, bounds)
+    add_observed_bounds!(
+        fullmodel, sys, pmap, tspan, tunable_params, bounds, observed_bounds_method
+    )
     add_cost_function!(fullmodel, sys, tspan, pmap)
     add_user_constraints!(fullmodel, sys, tspan, pmap)
     add_initial_constraints!(fullmodel, u0, u0_idxs, model_tspan[1])
 
-    return prob_type(f, u0, tspan, p, fullmodel; kwargs...), pmap
+    return prob_type(f, u0, tspan, p, fullmodel; kwargs...), pmap, nominal_values
 end
 
 """
@@ -456,6 +534,7 @@ end
 function set_initial_trajectory!(model, U, idx, traj)
     throw(ArgumentError("The `initial_trajectory` keyword argument is not supported by the $(nameof(typeof(model))) backend."))
 end
+function register_operator! end
 function generate_time_variable! end
 function generate_internal_model end
 function generate_state_variable! end
@@ -468,6 +547,9 @@ function add_constraint! end
 get_param_for_pmap(model, P, i) = P isa AbstractArray ? P[i] : P
 # Some backends need symbolic accessors instead of raw variables (CasADi in particular)
 needs_individual_tunables(model) = false
+# Backend representation of the independent variable, used to lower a bare `t` (e.g. inside a
+# callable parameter). Backends without an explicit time decision variable return `nothing`.
+lowered_time_variable(model) = nothing
 
 function f_wrapper(f, Uₙ, Vₙ, p, P, t)
     if isempty(P)
@@ -487,24 +569,30 @@ end
     extract_variable_bounds(sys, pmap, tf, tunable_params)
 
 Extract and parameter-substitute variable bounds from the system.
-Returns `(; state_bounds, input_bounds, param_bounds, tf_bounds)` where each
-`*_bounds` is a `Dict{Int, Tuple{Any, Any}}` mapping variable index to `(lo, hi)`,
-and `tf_bounds` is either `nothing` or a `(lo, hi)` tuple.
+Returns `(; state_bounds, input_bounds, param_bounds, tf_bounds, observed_bounds)` where
+`state_bounds`, `input_bounds`, `param_bounds` are `Dict{Int, Tuple{Any, Any}}` mapping
+variable index to `(lo, hi)`, `tf_bounds` is either `nothing` or a `(lo, hi)` tuple,
+and `observed_bounds` is a `Dict{Any, Tuple{Any, Any}}` mapping observed variable symbols
+to `(lo, hi)`. Observed bounds are sourced from variable metadata and the `user_bounds` dict
+(user bounds take priority). The backend is responsible for lifting observed bounds into
+auxiliary bounded decision variables with equality constraints.
 """
-function extract_variable_bounds(sys, pmap, tf, tunable_params, user_bounds = Dict())
+function extract_variable_bounds(sys, pmap, tspan, tunable_params, user_bounds = Dict())
+    tf = last(tspan)
     state_bounds = _extract_bounds(unknowns(sys), pmap)
     input_bounds = _extract_bounds(inputs(sys), pmap)
     param_bounds = _extract_bounds(tunable_params, pmap)
     # Merge user-provided bounds (override metadata bounds)
     dvs = unknowns(sys)
-    ctrls = inputs(sys)
+    dvs_set = Set(default_toterm.(dvs))
+    ctrls_set = Set(default_toterm.(inputs(sys)))
     for (var, (lo, hi)) in user_bounds
         idx = findfirst(v -> isequal(v, var), dvs)
         if !isnothing(idx)
             state_bounds[idx] = (lo, hi)
             continue
         end
-        idx = findfirst(v -> isequal(v, var), ctrls)
+        idx = findfirst(v -> isequal(v, var), inputs(sys))
         if !isnothing(idx)
             input_bounds[idx] = (lo, hi)
         end
@@ -518,7 +606,23 @@ function extract_variable_bounds(sys, pmap, tf, tunable_params, user_bounds = Di
     else
         nothing
     end
-    return (; state_bounds, input_bounds, param_bounds, tf_bounds)
+
+    # Collect bounds on observed variables: metadata first, user overrides
+    observed_bounds = Dict{SymbolicT, Tuple{SymbolicT, SymbolicT}}()
+    for eq in observed(unhack_system(sys))
+        v = default_toterm(unwrap(eq.lhs))
+        if hasbounds(v)
+            lo, hi = getbounds(v)
+            observed_bounds[v] = (Symbolics.fixpoint_sub(lo, pmap), Symbolics.fixpoint_sub(hi, pmap))
+        end
+    end
+    for (var, (lo, hi)) in user_bounds
+        var ∈ dvs_set && continue
+        var ∈ ctrls_set && continue
+        observed_bounds[var] = (lo, hi)
+    end
+
+    return (; state_bounds, input_bounds, param_bounds, tf_bounds, observed_bounds)
 end
 
 function _extract_bounds(vars, pmap)
@@ -535,6 +639,115 @@ function _extract_bounds(vars, pmap)
 end
 
 function set_variable_bounds! end
+
+"""
+    supports_bounds_lifting(model)
+
+Whether `model`'s backend can lift a bounded observed expression into an auxiliary
+bounded decision variable. Backends that can should define this to return `true` and
+implement [`lift_observed_bound!`](@ref).
+"""
+supports_bounds_lifting(model) = false
+
+"""
+    lift_observed_bound!(model, expr, lo, hi, scale, start)
+
+Introduce an auxiliary decision variable bounded by `[lo, hi]` and tie it to `expr` with
+the scaled equality `(expr - aux) / scale == 0`. `start` is the auxiliary variable's start
+value. Only called for backends where `supports_bounds_lifting` is `true`.
+"""
+function lift_observed_bound! end
+
+function resolve_observed_bounds_method(model, method)
+    return if method === :auto
+        supports_bounds_lifting(model) ? :lift : :constraint
+    elseif method === :lift
+        supports_bounds_lifting(model) || throw(
+            ArgumentError(
+                "`observed_bounds_method = :lift` is not supported by the " *
+                    "$(nameof(typeof(model))) backend. Use `:constraint`, or `:auto` to " *
+                    "pick the best available method per backend."
+            )
+        )
+        :lift
+    elseif method === :constraint
+        :constraint
+    else
+        throw(
+            ArgumentError(
+                "`observed_bounds_method` must be one of `:auto`, `:lift` or " *
+                    "`:constraint`, got $(repr(method))."
+            )
+        )
+    end
+end
+
+# Pick a start value for the auxiliary variable that at least satisfies its own bounds.
+# Defaulting to 0 (the backend default) can sit outside `[lo, hi]`, which starts the
+# lifted equality from an infeasible point and defeats the purpose of lifting.
+function aux_start_value(lo, hi)
+    isfinite(lo) && isfinite(hi) && return (lo + hi) / 2
+    # One-sided (or unbounded): keep the backend's natural 0 start when it is
+    # feasible — starting exactly on the finite bound is hostile to interior-point
+    # methods — and only fall back to the bound itself when 0 is outside.
+    lo <= 0 <= hi && return 0.0
+    return isfinite(lo) ? lo : hi
+end
+
+"""
+    add_observed_bounds!(model, sys, pmap, tspan, tunable_params, user_bounds, method)
+
+Enforce bounds declared on observed variables.
+
+`method` selects how:
+
+  - `:lift` introduces an auxiliary bounded decision variable per bounded observed
+    expression, tied to it by an equality constraint. Interior-point solvers handle
+    variable bounds much better than nonlinear inequalities, but not every backend can
+    do this.
+  - `:constraint` emits the bounds directly as nonlinear inequality constraints. Works
+    on every backend.
+  - `:auto` (the default) uses `:lift` where the backend supports it and `:constraint`
+    everywhere else.
+"""
+function add_observed_bounds!(
+        model, sys, pmap, tspan, tunable_params, user_bounds, method = :auto
+    )
+    (; observed_bounds) = extract_variable_bounds(
+        sys, pmap, tspan, tunable_params, user_bounds
+    )
+    isempty(observed_bounds) && return nothing
+
+    method = resolve_observed_bounds_method(model, method)
+
+    rules = Dict{Any, Any}()
+    get_model_vars_substitution_rules!(rules, model, sys, tspan)
+    get_observed_substitution_rules!(rules, sys)
+    get_param_substitution_rules!(rules, pmap)
+
+    for (var, (lo, hi)) in observed_bounds
+        # `observed_bounds` stores its values symbolically: resolve parameter
+        # references and unwrap numeric constants so the backends receive plain
+        # numbers, as for the state and input bounds.
+        lo = value(Symbolics.fixpoint_sub(lo, pmap))
+        hi = value(Symbolics.fixpoint_sub(hi, pmap))
+        if method === :lift
+            expr = fixpoint_sub(var, rules; fold = Val(true), filterer = Returns(true))
+            lift_observed_bound!(
+                model, expr, lo, hi, getnominal(var), aux_start_value(lo, hi)
+            )
+        else
+            cons = Any[]
+            isfinite(lo) && push!(cons, var ≳ lo)
+            isfinite(hi) && push!(cons, var ≲ hi)
+            cons = fixpoint_sub(cons, rules; fold = Val(true), filterer = Returns(true))
+            for c in cons
+                add_constraint!(model, c)
+            end
+        end
+    end
+    return nothing
+end
 
 is_free_final(model) = model.is_free_final
 
@@ -599,6 +812,11 @@ function get_model_vars_substitution_rules!(rules::Dict{Any, Any}, model, sys, t
         rules[tf] = _tf
     end
     merge!(rules, fixed_t_map(model, x_ops, c_ops))
+    # Lower a bare independent variable (e.g. inside `forcing(t)`) onto the backend's time
+    # variable. State/input calls `x(t)` are replaced as whole subtrees before the traversal
+    # reaches their inner `t`, so this rule only fires on genuinely-bare occurrences.
+    tvar = lowered_time_variable(model)
+    tvar === nothing || (rules[unwrap(t)] = tvar)
     return nothing
 end
 
@@ -696,15 +914,20 @@ function add_user_constraints!(model, sys, tspan, pmap)
     return
 end
 
-function add_equational_constraints!(model, sys, pmap, tspan)
+function add_equational_constraints!(model, sys, pmap, tspan, nominal_values = Dict())
     rules = Dict{Any, Any}()
     get_observed_substitution_rules!(rules, sys)
     get_model_vars_substitution_rules!(rules, model, sys, tspan)
     get_param_substitution_rules!(rules, pmap)
     get_differential_substitution_rules!(rules, model, sys)
+    dvs = unknowns(sys)
     diff_eqs = fixpoint_sub(diff_equations(sys), rules; fold = Val(true), filterer = Returns(true))
-    for eq in diff_eqs
-        add_constraint!(model, eq.lhs ~ unwrap_const(eq.rhs) * model.tₛ)
+    for (i, eq) in enumerate(diff_eqs)
+        # User-provided nominal values override the variable's nominal metadata.
+        # Scale the entire residual, not each side independently.
+        # (∂x - tₛ*f(x)) / scale == 0 prevents degenerate tₛ → 0 solutions.
+        s = get(nominal_values, dvs[i], getnominal(dvs[i]))
+        add_constraint!(model, (unwrap_const(eq.lhs) - unwrap_const(eq.rhs) * model.tₛ) / s ~ 0)
     end
 
     alg_eqs = fixpoint_sub(alg_equations(sys), rules; fold = Val(true), filterer = Returns(true))
