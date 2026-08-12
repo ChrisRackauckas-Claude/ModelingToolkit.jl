@@ -1,3 +1,45 @@
+# Used by OrdinaryDiffEq* extensions. Not public API.
+function _solver_precompile_problems()
+    @parameters a = 1.0 b = 1.0
+    @variables x(t_nounits) y(t_nounits)
+    ode = ODEProblem(
+        mtkcompile(
+            System(
+                [D_nounits(x) ~ a * y, D_nounits(y) ~ -b * x],
+                t_nounits; name = :precompile_ode
+            )
+        ),
+        [x => 1.0, y => 0.0], (0.0, 1.0)
+    )
+
+    @parameters k = 1.0
+    @variables u(t_nounits) = 1.0 v(t_nounits) = 1.0
+    # `complete` (not `mtkcompile`) keeps the algebraic unknown so this stays a DAE.
+    daesys = complete(
+        System(
+            [D_nounits(u) ~ -k * u, 0 ~ v - u],
+            t_nounits; name = :precompile_dae
+        )
+    )
+    mmdae = ODEProblem(
+        daesys, [u => 1.0, v => 1.0], (0.0, 1.0);
+        warn_initialize_determined = false
+    )
+    dae = DAEProblem(
+        daesys,
+        [D_nounits(u) => -1.0, D_nounits(v) => 0.0, u => 1.0, v => 1.0],
+        (0.0, 1.0);
+        warn_initialize_determined = false
+    )
+    return (; ode, mmdae, dae)
+end
+
+function _solve_precompile(prob, alg)
+    solve(prob, alg; save_everystep = false)
+    wrapped = DiffEqBase.get_concrete_problem(prob, true; alg)
+    return solve(wrapped, alg; save_everystep = false)
+end
+
 PrecompileTools.@compile_workload begin
     fold1 = Val{false}()
     using SymbolicUtils

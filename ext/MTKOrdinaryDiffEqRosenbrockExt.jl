@@ -1,24 +1,15 @@
 module MTKOrdinaryDiffEqRosenbrockExt
 
 using ModelingToolkit
+using ModelingToolkitBase
 using OrdinaryDiffEqRosenbrock: Rodas5P
 using PrecompileTools: @compile_workload, @setup_workload
-using ModelingToolkit: t_nounits, D_nounits
 
 @setup_workload begin
-    @parameters a = 1.0 b = 1.0
-    @variables x(t_nounits) y(t_nounits)
-    prob = ODEProblem(
-        mtkcompile(
-            System(
-                [D_nounits(x) ~ a * y, D_nounits(y) ~ -b * x],
-                t_nounits; name = :precompile_rosenbrock
-            )
-        ),
-        [x => 1.0, y => 0.0], (0.0, 1.0)
-    )
+    probs = ModelingToolkitBase._solver_precompile_problems()
     @compile_workload begin
-        solve(prob, Rodas5P())
+        ModelingToolkitBase._solve_precompile(probs.ode, Rodas5P())
+        ModelingToolkitBase._solve_precompile(probs.mmdae, Rodas5P())
     end
 end
 

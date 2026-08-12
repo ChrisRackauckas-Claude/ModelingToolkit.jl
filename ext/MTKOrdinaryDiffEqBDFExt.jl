@@ -1,24 +1,27 @@
 module MTKOrdinaryDiffEqBDFExt
 
 using ModelingToolkit
-using OrdinaryDiffEqBDF: FBDF
+using ModelingToolkitBase
+using OrdinaryDiffEqBDF
+using OrdinaryDiffEqBDF: FBDF, DFBDF
 using PrecompileTools: @compile_workload, @setup_workload
-using ModelingToolkit: t_nounits, D_nounits
 
 @setup_workload begin
-    @parameters a = 1.0 b = 1.0
-    @variables x(t_nounits) y(t_nounits)
-    prob = ODEProblem(
-        mtkcompile(
-            System(
-                [D_nounits(x) ~ a * y, D_nounits(y) ~ -b * x],
-                t_nounits; name = :precompile_bdf
-            )
-        ),
-        [x => 1.0, y => 0.0], (0.0, 1.0)
-    )
+    probs = ModelingToolkitBase._solver_precompile_problems()
+    ode_algs = Any[FBDF()]
+    dae_algs = Any[DFBDF()]
+    if isdefined(OrdinaryDiffEqBDF, :NordsieckBDF)
+        push!(ode_algs, OrdinaryDiffEqBDF.NordsieckBDF())
+        push!(dae_algs, OrdinaryDiffEqBDF.DNordsieckBDF())
+    end
     @compile_workload begin
-        solve(prob, FBDF())
+        for alg in ode_algs
+            ModelingToolkitBase._solve_precompile(probs.ode, alg)
+            ModelingToolkitBase._solve_precompile(probs.mmdae, alg)
+        end
+        for alg in dae_algs
+            ModelingToolkitBase._solve_precompile(probs.dae, alg)
+        end
     end
 end
 

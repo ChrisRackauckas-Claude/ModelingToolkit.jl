@@ -2,6 +2,9 @@ using ModelingToolkitBase
 using ModelingToolkitBase: t_nounits as t, D_nounits as D, MTKParameters
 using DiffEqBase
 using OrdinaryDiffEq
+using OrdinaryDiffEqBDF
+using OrdinaryDiffEqDefault
+using OrdinaryDiffEqRosenbrock
 using Random
 using SciMLStructures
 using SymbolicIndexingInterface
@@ -161,8 +164,11 @@ using Test
     @test SciMLBase.successful_retcode(solve(hybrid_prob, Tsit5()))
 end
 
-@testset "MTK-shaped Tsit5 precompile extension" begin
+@testset "MTK-shaped solver precompile extensions" begin
     @test Base.get_extension(ModelingToolkitBase, :MTKOrdinaryDiffEqTsit5Ext) !== nothing
+    @test Base.get_extension(ModelingToolkitBase, :MTKOrdinaryDiffEqDefaultExt) !== nothing
+    @test Base.get_extension(ModelingToolkitBase, :MTKOrdinaryDiffEqBDFExt) !== nothing
+    @test Base.get_extension(ModelingToolkitBase, :MTKOrdinaryDiffEqRosenbrockExt) !== nothing
 
     @parameters c = 1.0
     @variables w(t) = 1.0
