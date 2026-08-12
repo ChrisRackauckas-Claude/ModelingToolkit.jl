@@ -160,3 +160,25 @@ using Test
     @test hybrid_prob.prob.p isa MTKParameters
     @test SciMLBase.successful_retcode(solve(hybrid_prob, Tsit5()))
 end
+
+@testset "MTK-shaped Tsit5 precompile extension" begin
+    @test Base.get_extension(ModelingToolkitBase, :MTKOrdinaryDiffEqTsit5Ext) !== nothing
+
+    @parameters c = 1.0
+    @variables w(t) = 1.0
+    other = mtkcompile(System([D(w) ~ -c * w], t; name = :other_precompile_shape))
+    other_prob = ODEProblem(other, [], (0.0, 1.0))
+    other_concrete = DiffEqBase.get_concrete_problem(other_prob, true; alg = Tsit5())
+    @test other_concrete.p isa SciMLBase.DespecializedParameters
+    @test other_concrete.f.sys isa System
+    @test other_concrete.f.observed isa ModelingToolkitBase.ObservedFunctionCache
+    other_integ = init(other_prob, Tsit5(); adaptive = false, dt = 0.1, save_everystep = false)
+    @test other_integ.p isa SciMLBase.DespecializedParameters
+
+    @parameters d = 2.0
+    @variables v(t) = 1.0
+    second = mtkcompile(System([D(v) ~ -d * v], t; name = :second_precompile_shape))
+    second_prob = ODEProblem(second, [], (0.0, 1.0))
+    second_integ = init(second_prob, Tsit5(); adaptive = false, dt = 0.1, save_everystep = false)
+    @test typeof(other_integ) === typeof(second_integ)
+end
