@@ -197,7 +197,6 @@ getnominal(x[1])
 hasnominal
 getnominal
 setnominal
-ModelingToolkit.VariableNominal
 ```
 
 ## Guess
@@ -392,12 +391,8 @@ ModelingToolkit.dump_parameters
 ## Symbolic operators
 
 ModelingToolkit makes heavy use of "operators". These are custom functions that are applied
-to symbolic variables. The most common operator is the `Differential` operator, defined in
+to symbolic variables. The most common operator is the Differential operator, defined in
 Symbolics.jl.
-
-```@docs
-Symbolics.Differential
-```
 
 ModelingToolkit also defines a plethora of custom operators.
 
@@ -429,5 +424,4 @@ such systems, it has the capability to represent them.
 Sample
 Hold
 SampleTime
-sampletime
 ```
