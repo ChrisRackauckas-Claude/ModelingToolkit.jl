@@ -26,6 +26,8 @@ ModelingToolkit.generate_update_b
 ModelingToolkit.generate_semiquadratic_functions
 ModelingToolkit.generate_semiquadratic_jacobian
 ModelingToolkit.get_semiquadratic_W_sparsity
+ModelingToolkitBase.CompilerOptions
+ModelingToolkitBase.generate_custom_function
 ```
 
 For functions such as jacobian calculation which require symbolic computation, there
@@ -48,6 +50,14 @@ ModelingToolkit.calculate_constraint_jacobian
 ModelingToolkit.calculate_constraint_hessian
 ModelingToolkit.calculate_control_jacobian
 ModelingToolkit.calculate_A_b
+```
+
+A system can be marked as unsupported by symbolic automatic differentiation, in which case
+the `calculate_*` functions above throw instead of producing a wrong derivative.
+
+```@docs
+ModelingToolkitBase.SymbolicADDisallowed
+ModelingToolkitBase.check_symbolic_ad_allowed
 ```
 
 All code generation eventually calls `build_function_wrapper`.

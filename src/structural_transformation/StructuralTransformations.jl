@@ -1,3 +1,10 @@
+"""
+    StructuralTransformations
+
+Developer-facing structural transformations used by ModelingToolkit's compiler and SciML
+extension packages. The exported transformation functions are versioned developer API;
+end-user applications should use [`mtkcompile`](@ref) instead.
+"""
 module StructuralTransformations
 
 using Setfield: @set!, @set
@@ -78,7 +85,7 @@ should usually call [`mtkcompile`](@ref).
 # Arguments
 
 - `sys`: system whose equations should be substituted.
-- `kwargs...`: keyword arguments forwarded to [`full_equations`](@ref).
+- `kwargs...`: keyword arguments forwarded to `full_equations`.
 
 # Returns
 

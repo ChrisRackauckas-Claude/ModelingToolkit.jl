@@ -10,6 +10,16 @@ and returning specific values. This format of argument and return value depends 
 the function and the problem. ModelingToolkit is capable of compiling and generating
 code for a variety of such numerical problems.
 
+## In-place and out-of-place problems
+
+Every problem and function constructor takes an `iip` type parameter selecting an in-place
+or out-of-place formulation. Problem constructors called without it defer the choice to
+construction time using a sentinel type.
+
+```@docs
+ModelingToolkitBase.Both
+```
+
 ## Dynamical systems
 
 ```@docs
@@ -27,7 +37,9 @@ SciMLBase.SDDEFunction
 SciMLBase.SDDEProblem
 JumpProcesses.JumpProblem
 SciMLBase.BVProblem
+SciMLBase.DiscreteFunction
 SciMLBase.DiscreteProblem
+SciMLBase.ImplicitDiscreteFunction
 SciMLBase.ImplicitDiscreteProblem
 ```
 
@@ -105,6 +117,8 @@ reorder_dimension_by_tunables
 ```@docs
 generate_initializesystem
 InitializationProblem
+ModelingToolkit.analyze_initialization_jacobian
+ModelingToolkitBase.MissingGuessValue
 ```
 
 ## Linear analysis
@@ -112,6 +126,7 @@ InitializationProblem
 ```@docs
 linearization_function
 LinearizationProblem
+ModelingToolkit.LinearizationOpPoint
 linearize
 CommonSolve.solve(::LinearizationProblem)
 ModelingToolkit.linearize_symbolic

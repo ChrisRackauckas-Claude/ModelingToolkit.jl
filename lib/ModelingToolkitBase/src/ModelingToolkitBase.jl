@@ -155,15 +155,35 @@ abstract type AbstractSystem end
 abstract type IntermediateDeprecationSystem <: AbstractSystem end
 
 """
-    independent_variable
+    independent_variable(sys)
 
-Generic function for querying the primary independent variable of a system-like object.
+Return the scalar independent variable of `sys`, or `nothing` when `sys` has no scalar
+independent variable.
 
-Most users should call [`independent_variables`](@ref), which returns the independent
-variables as a vector. Packages that define custom system types may extend
-`independent_variable` when a scalar independent-variable interface is required.
+Most users should call [`independent_variables`](@ref), which always returns a vector. This
+is the scalar extension point for packages that define custom `AbstractSystem` subtypes;
+external packages should extend `independent_variable` only. The generic
+`independent_variables` accessor wraps that scalar value and should not be extended.
+
+# Arguments
+
+- `sys`: A system-like object with a scalar independent variable.
+
+# Returns
+
+- The scalar independent variable of `sys`, or `nothing`.
+
+# Examples
+
+```julia
+struct ScalarIVSystem <: ModelingToolkitBase.AbstractSystem
+    iv
+end
+ModelingToolkitBase.independent_variable(sys::ScalarIVSystem) = getfield(sys, :iv)
+```
 """
 function independent_variable end
+independent_variable(sys::AbstractSystem) = isdefined(sys, :iv) ? getfield(sys, :iv) : nothing
 
 # this has to be included early to deal with dependency issues
 function complete end
@@ -343,7 +363,6 @@ export calculate_jacobian, generate_jacobian, generate_rhs, generate_custom_func
 export calculate_control_jacobian, generate_control_jacobian
 export calculate_tgrad, generate_tgrad
 export generate_cost, calculate_cost_gradient, generate_cost_gradient
-export generate_trajectory
 export calculate_cost_hessian, generate_cost_hessian
 export calculate_massmatrix, generate_diffusion_function
 export generate_control_function, build_explicit_observed_function
@@ -391,7 +410,6 @@ export AbstractCollocation, JuMPCollocation, InfiniteOptCollocation,
     CasADiCollocation, PyomoCollocation
 export DynamicOptSolution
 export MissingGuessValue
-export MiscSystemData
 
 export AssignmentAffect
 
