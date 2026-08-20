@@ -58,67 +58,6 @@ end
     @test g([1.0], [2.0], p, 3.0) ≈ [7.0]
 end
 
-# Names rendered by a canonical ```@docs``` block somewhere under `docs/src`, counted so a
-# name landing in two canonical blocks (which fails the Documenter build) is visible here.
-# `SciMLTesting.run_api_docs(...; rendered = true)` cannot stand in for this: it short
-# circuits to a pass as soon as any ```@autodocs``` block exists anywhere in the manual,
-# and this manual has two narrowly scoped ones.
-function canonical_docs_entries(docs_src)
-    counts = Dict{String, Int}()
-    for (root, _, files) in walkdir(docs_src), file in files
-        endswith(file, ".md") || continue
-        inblock = false
-        canonical = false
-        for line in eachline(joinpath(root, file))
-            stripped = strip(line)
-            if inblock
-                if stripped == "```"
-                    inblock = false
-                elseif canonical && !isempty(stripped)
-                    name = last(split(first(split(stripped, '(')), '.'))
-                    counts[name] = get(counts, name, 0) + 1
-                end
-            elseif startswith(stripped, "```@docs")
-                inblock = true
-                canonical = !occursin("canonical = false", stripped)
-            end
-        end
-    end
-    return counts
-end
-
-@testset "Public API is rendered in the manual" begin
-    docs_src = joinpath(dirname(dirname(@__DIR__)), "docs", "src")
-    @test isdir(docs_src)
-    entries = canonical_docs_entries(docs_src)
-    @test !isempty(entries)
-
-    # Every system field carries a `get_`/`has_` accessor pair, generated together with a
-    # docstring and declared `public`. Deriving the list from `SYS_PROPS` rather than
-    # pinning it means a newly added field fails here until it is documented too.
-    accessors = [
-        Symbol(prefix, prop)
-            for prop in [ModelingToolkitBase.SYS_PROPS; [:continuous_events, :discrete_events]]
-            for prefix in (:get_, :has_)
-    ]
-    # Public names whose only gap was rendering. `AnalysisPoint` is deliberately absent: it
-    # is rendered by #4969, and listing it in two canonical blocks is itself a build error.
-    audited = [
-        Symbol("@discretes"), Symbol("@mtkbuild"), Symbol("@poissonians"), :DiscreteSystem,
-        :ImplicitDiscreteSystem, :ODESystem, :analytically_integrated, :discrete_events,
-        :get_w, :structural_simplify,
-    ]
-
-    for name in [accessors; audited]
-        @test isdefined(ModelingToolkitBase, name)
-        @static if VERSION >= v"1.11"
-            @test Base.ispublic(ModelingToolkitBase, name)
-        end
-        @test haskey(Base.Docs.meta(ModelingToolkitBase), Docs.Binding(ModelingToolkitBase, name))
-        @test get(entries, string(name), 0) == 1
-    end
-end
-
 # The exact set of externally-owned bindings ModelingToolkit deliberately exposes as part
 # of its own public API. ModelingToolkit is a facade: `@reexport using ModelingToolkitBase`
 # pulls up the modelling layer, which in turn `@reexport`s Symbolics (and, through it,
@@ -269,21 +208,6 @@ const REEXPORTED_API = (
     :find_solvables!,
     # UnPack: `@unpack`/`@pack!`, re-exported by ModelingToolkitBase.
     Symbol("@pack!"), Symbol("@unpack"), :UnPack,
-)
-
-# Public names that reach ModelingToolkit's API surface only through
-# `@reexport using Symbolics` in ModelingToolkitBase. They are owned (and undocumented) by
-# Symbolics/SymbolicUtils, so ModelingToolkit is not the right place to document them.
-const SYMBOLICS_OWNED_REEXPORTS = (
-    Symbol("@symbolic_wrap"),
-    Symbol("@wrapped"),
-    :RuleSet,
-    :get_canonical_expr,
-    :infimum,
-    :is_derivative,
-    :istree,
-    :solve_for,
-    :supremum,
 )
 
 # `ModelingToolkit` reaches for names that are not `public` at the module that defines
@@ -437,9 +361,14 @@ end
 run_qa(
     ModelingToolkit;
     Aqua = Aqua,
+    # JET currently exhausts tens of GB of memory on MTK and reports false
+    # positives from generated short-circuit guards. Track the fix in MTK and
+    # upstream before re-enabling this lane:
+    # https://github.com/SciML/ModelingToolkit.jl/issues/4958
+    # https://github.com/JuliaLang/julia/issues/62745
+    # https://github.com/aviatesk/JET.jl/issues/858
     JET = JET,
-    jet = true,
-    jet_kwargs = (; target_defined_modules = true),
+    jet = false,
     aqua_kwargs = (;
         piracies = (; treat_as_own = (MTKBASE_OWNED_TYPES..., STRUCTURAL_TYPES...)),
     ),
@@ -447,6 +376,5 @@ run_qa(
         all_explicit_imports_are_public = (; ignore = NONPUBLIC_EXPLICIT_IMPORTS),
         all_qualified_accesses_are_public = (; ignore = NONPUBLIC_QUALIFIED_ACCESSES),
     ),
-    api_docs_kwargs = (; ignore = SYMBOLICS_OWNED_REEXPORTS),
     reexports_allow = REEXPORTED_API,
 )

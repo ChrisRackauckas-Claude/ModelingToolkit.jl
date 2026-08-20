@@ -40,6 +40,8 @@ struct MTKParameters{T, I, D, C, N, H}
     end
 end
 
+_unwrap_mtk_parameters(params) = SciMLBase.unwrap_parameters(params)
+
 """
     function MTKParameters(sys::AbstractSystem, p, u0 = Dict(); t0 = nothing)
 
@@ -1011,7 +1013,8 @@ end
 Base.size(::NestedGetIndex) = ()
 
 function SymbolicIndexingInterface.with_updated_parameter_timeseries_values(
-        ::AbstractSystem, ps::MTKParameters, args::Pair{<:Any, <:NestedGetIndex}...
+        ::AbstractSystem, ps::MTKParameters,
+        args::Pair{<:Any, <:NestedGetIndex}...
     )
     for (i, ngi) in args
         for (j, val) in enumerate(ngi.x)
@@ -1038,6 +1041,16 @@ function SciMLBase.create_parameter_timeseries_collection(
     return ParameterTimeseriesCollection(Tuple(buffers), copy(ps))
 end
 
+function SciMLBase.create_parameter_timeseries_collection(
+        sys::AbstractSystem, ps::SciMLBase.DespecializedParameters, tspan
+    )
+    collection = SciMLBase.create_parameter_timeseries_collection(
+        sys, SciMLBase.unwrap_parameters(ps), tspan
+    )
+    collection === nothing && return nothing
+    return ParameterTimeseriesCollection(parent(collection), copy(ps))
+end
+
 @inline __get_blocks(tsidx::Int) = ()
 @inline function __get_blocks(tsidx::Int, buffer::BlockedArray, buffers...)
     return (buffer[Block(tsidx)], __get_blocks(tsidx, buffers...)...)
@@ -1052,6 +1065,15 @@ function SciMLBase.get_saveable_values(
     return NestedGetIndex(__get_blocks(timeseries_idx, ps.discrete...))
 end
 
+
+function SciMLBase.get_saveable_values(
+        sys::AbstractSystem, ps::SciMLBase.DespecializedParameters, timeseries_idx
+    )
+    return SciMLBase.get_saveable_values(
+        sys, SciMLBase.unwrap_parameters(ps), timeseries_idx
+    )
+end
+
 function save_callback_discretes!(integ::SciMLBase.DEIntegrator, callback)
     ic = get_index_cache(indp_to_system(integ))
     ic === nothing && return
@@ -1064,16 +1086,16 @@ function save_callback_discretes!(integ::SciMLBase.DEIntegrator, callback)
     return
 end
 
-function DiffEqBase.anyeltypedual(
+function SciMLBase.anyeltypedual(
         p::MTKParameters, ::Type{Val{counter}} = Val{0}
     ) where {counter}
-    return DiffEqBase.anyeltypedual(p.tunable)
+    return SciMLBase.anyeltypedual(p.tunable)
 end
-function DiffEqBase.anyeltypedual(
+function SciMLBase.anyeltypedual(
         p::Type{<:MTKParameters{T}},
         ::Type{Val{counter}} = Val{0}
     ) where {counter} where {T}
-    return DiffEqBase.anyeltypedual(T)
+    return SciMLBase.anyeltypedual(T)
 end
 
 # for compiling callbacks

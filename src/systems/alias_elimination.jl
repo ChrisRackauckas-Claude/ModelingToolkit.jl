@@ -1,12 +1,12 @@
 using SymbolicUtils: Rewriters
-using Graphs.Experimental.Traversals
+import Graphs.Experimental.Traversals
 
 """
     alias_elimination(sys)
 
 Run the alias-elimination pass on `sys`.
 
-This is a lower-level structural simplification pass used by [`mtkcompile`](@ref).
+This is a lower-level structural simplification pass used by [`ModelingToolkitBase.mtkcompile`](@ref).
 End-user code should usually call `mtkcompile` instead.
 
 # Developer Interface

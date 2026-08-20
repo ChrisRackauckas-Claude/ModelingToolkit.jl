@@ -73,7 +73,7 @@ _gfo_bool(b::Bool) = b
     GeneratedFunctionOptions{expression, wrap_gfw}(; kwargs...)
 
 Options for the code-generation entry points (`generate_rhs`, `generate_jacobian`, ...):
-the "output/compile" layer sitting one level above [`BuildFunctionWrapperOptions`](@ref).
+the "output/compile" layer sitting one level above `BuildFunctionWrapperOptions`.
 It controls how the generated code is realized (returned as an `Expr` vs compiled to a
 callable, and whether wrapped in a `GeneratedFunctionWrapper`) and holds a nested
 `Symbolics.CodegenFunctionOptions` (`codegen`) with the low-level code-generation options
@@ -292,21 +292,21 @@ const _COMPILER_OPTIONS_SUPPORTED = isdefined(Base.Experimental, :set_compile!)
 module _EvalModuleOpt0
     @static if !isdefined(Base.Experimental, :set_compile!)
         Base.Experimental.@compiler_options optimize = 0
-        using RuntimeGeneratedFunctions
+        import RuntimeGeneratedFunctions
         RuntimeGeneratedFunctions.init(@__MODULE__)
     end
 end
 module _EvalModuleOpt1
     @static if !isdefined(Base.Experimental, :set_compile!)
         Base.Experimental.@compiler_options optimize = 1
-        using RuntimeGeneratedFunctions
+        import RuntimeGeneratedFunctions
         RuntimeGeneratedFunctions.init(@__MODULE__)
     end
 end
 module _EvalModuleOpt0NoInfer
     @static if !isdefined(Base.Experimental, :set_compile!)
         Base.Experimental.@compiler_options optimize = 0 infer = false
-        using RuntimeGeneratedFunctions
+        import RuntimeGeneratedFunctions
         RuntimeGeneratedFunctions.init(@__MODULE__)
     end
 end
@@ -544,7 +544,7 @@ function isdelay(var, iv)
     end
     isvariable(var) || return false
     isparameter(var) && return false
-    if iscall(var) && !ModelingToolkitBase.isoperator(var, Symbolics.Operator)
+    if iscall(var) && !ModelingToolkitBase.isoperator(var, SU.Operator)
         args = arguments(var)
         length(args) == 1 || return false
         arg = args[1]
@@ -560,7 +560,7 @@ end
 The argument of generated functions corresponding to the history function.
 """
 const DDE_HISTORY_FUN = SSym(:___history___; type = SU.FnType{Tuple{Any, <:Real}, Vector{Real}, Nothing}, shape = SU.Unknown(1))
-const BVP_SOLUTION = SSym(:__sol__; type = Symbolics.FnType{Tuple{<:Real}, Vector{Real}, Nothing}, shape = SU.Unknown(1))
+const BVP_SOLUTION = SSym(:__sol__; type = SU.FnType{Tuple{<:Real}, Vector{Real}, Nothing}, shape = SU.Unknown(1))
 const DDE_AT_IDX_SYM = SSym(:__delayvar_idxₘₜₖ; type = Int, shape = UnitRange{Int}[])
 const DDE_DELAY_SYM = SSym(:__delayxₘₜₖ; type = Real, shape = UnitRange{Int}[])
 
@@ -750,7 +750,7 @@ end
     build_function_wrapper(sys::AbstractSystem, expr, args...; kwargs...)
 
 Backwards-compatibility keyword-argument form of `build_function_wrapper`. The keyword
-arguments (documented on [`BuildFunctionWrapperOptions`](@ref)) are bundled into a
+arguments (documented on `BuildFunctionWrapperOptions`) are bundled into a
 `BuildFunctionWrapperOptions` and forwarded to the primary method,
 [`build_function_wrapper(sys, expr, args, opts::BuildFunctionWrapperOptions)`](@ref). This
 method exists only for backwards compatibility; new code should construct a
@@ -790,7 +790,7 @@ A wrapper around `build_function` which performs the necessary transformations f
 code generation of all types of systems. `expr` is the expression returned from the
 generated functions, and `args` is the `Vector{Any}` of arguments.
 
-Options are supplied as a [`BuildFunctionWrapperOptions`](@ref); see its docstring for the
+Options are supplied as a `BuildFunctionWrapperOptions`; see its docstring for the
 available options. This is the primary method — the keyword-argument form of
 `build_function_wrapper` is a backwards-compatibility shim that bundles its keywords into a
 `BuildFunctionWrapperOptions` and calls this method.
@@ -1041,6 +1041,11 @@ function GeneratedFunctionWrapper{P}(
 end
 
 function (gfw::GeneratedFunctionWrapper{Tuple{PIdx, NArgs, Split}})(args::Vararg{Any, NArgs}) where {PIdx, NArgs, Split}
+    if args[PIdx] isa SciMLBase.DespecializedParameters
+        return SciMLBase.invoke_with_despecialized_parameters(
+            gfw.f_oop, args, args[PIdx], Val(PIdx)
+        )
+    end
     # non-split systems just call it as-is
     Split || return gfw.f_oop(args...)
     if args[PIdx] isa Union{Tuple, MTKParameters} && !(args[PIdx] isa Tuple{Vararg{Number}})
@@ -1058,6 +1063,11 @@ function (gfw::GeneratedFunctionWrapper{Tuple{PIdx, NArgs, Split}})(args::Vararg
     # IIP case has one more argument
     if NArgs + 1 != N
         throw(MethodError(gfw, args))
+    end
+    if args[PIdx + 1] isa SciMLBase.DespecializedParameters
+        return SciMLBase.invoke_with_despecialized_parameters(
+            gfw.f_iip, args, args[PIdx + 1], Val(PIdx + 1)
+        )
     end
     Split || return gfw.f_iip(args...)
     if args[PIdx + 1] isa Union{Tuple, MTKParameters} && !(args[PIdx + 1] isa Tuple{Vararg{Number}})

@@ -42,7 +42,7 @@ end
     SciMLBase.ODEFunction{iip, spec}(sys::System, opts::SciMLFunctionOptions; kwargs...)
 
 Public entry point that builds an `ODEFunction` directly from a pre-assembled
-[`SciMLFunctionOptions`](@ref), bypassing the `kwargs...` wrapper above. Useful for callers
+`SciMLFunctionOptions`, bypassing the `kwargs...` wrapper above. Useful for callers
 that already hold (or want to share/reuse) an options struct, since — unlike the `kwargs...`
 wrapper — this method does not need to re-validate or re-assemble the option set.
 """
@@ -111,7 +111,7 @@ function SciMLBase.ODEFunction{iip, spec}(
     )
 
     odefn = maybe_codegen_scimlfn(Val{E}, ODEFunction{iip, spec}, args; kwargs...)
-    if !E && spec === SciMLBase.AutoSpecialize
+    if !E && spec in (SciMLBase.AutoSpecialize, SciMLBase.AutoDespecialize)
         odefn = SciMLBase.widen_bounded_type_params(odefn)
     end
     return odefn
