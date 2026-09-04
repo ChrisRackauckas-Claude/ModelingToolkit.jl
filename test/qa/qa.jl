@@ -13,13 +13,17 @@ import ModelingToolkit: t_nounits as t, D_nounits as D
 using FMIImport
 using OrdinaryDiffEqBDF
 using OrdinaryDiffEqDefault
+using OrdinaryDiffEqNonlinearSolve
 using OrdinaryDiffEqRosenbrock
+using OrdinaryDiffEqTsit5
 
 const MTK_EXTENSIONS = (
     :MTKFMIExt,
     :MTKOrdinaryDiffEqBDFExt,
     :MTKOrdinaryDiffEqDefaultExt,
     :MTKOrdinaryDiffEqRosenbrockExt,
+    :MTKOrdinaryDiffEqRosenbrockNonlinearSolveExt,
+    :MTKOrdinaryDiffEqTsit5Ext,
 )
 
 # ExplicitImports silently skips an extension that fails to load, so assert the
