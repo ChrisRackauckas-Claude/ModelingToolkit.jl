@@ -7,8 +7,12 @@ using PrecompileTools: @compile_workload, @setup_workload
 
 @setup_workload begin
     daeprob = ModelingToolkit.precompile_dae_problem()
+    sccprob = ModelingToolkit.precompile_scc_dae_problem()
+    nllsprob = ModelingToolkit.precompile_nlls_problem()
     @compile_workload begin
         solve(daeprob, Rodas5P())
+        solve(sccprob, Rodas5P())
+        solve(nllsprob, Rodas5P())
     end
 end
 

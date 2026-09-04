@@ -20,8 +20,8 @@ end
     precompile_dae_problem()
 
 Small mass-matrix DAE used by the precompile workloads: one algebraic unknown fixed by a
-nonlinear constraint, so `ODEProblem` builds a non-trivial (SCC) initialization problem
-and `solve` runs `OverrideInit`.
+nonlinear constraint, so `ODEProblem` builds a `NonlinearProblem` for initialization and
+`solve` runs `OverrideInit`.
 """
 function precompile_dae_problem()
     t = MTKBase.t_nounits
@@ -30,6 +30,73 @@ function precompile_dae_problem()
     @variables x(t) y(t)
     sys = mtkcompile(System([D(x) ~ -k * x + y, 0 ~ y^3 + y - x], t; name = :precompile_dae))
     return ODEProblem(sys, [x => 1.0], (0.0, 1.0); guesses = [y => 0.5])
+end
+
+"""
+    precompile_scc_dae_problem()
+
+Mass-matrix DAE with two nonlinear algebraic unknowns in a chain, so `ODEProblem` builds a
+two-block `SCCNonlinearProblem` for initialization.
+"""
+function precompile_scc_dae_problem()
+    t = MTKBase.t_nounits
+    D = MTKBase.D_nounits
+    @parameters k = 1.0
+    @variables x(t)[1:2] y(t)[1:2]
+    eqs = [
+        D(x[1]) ~ -k * x[1] + y[1], 0 ~ y[1]^3 + y[1] - x[1],
+        D(x[2]) ~ -k * x[2] + y[2], 0 ~ y[2]^3 + y[2] - x[2] - y[1],
+    ]
+    sys = mtkcompile(System(eqs, t; name = :precompile_scc_dae))
+    return ODEProblem(
+        sys, [sys.x[1] => 1.0, sys.x[2] => 0.5], (0.0, 1.0);
+        guesses = [sys.y[1] => 0.5, sys.y[2] => 0.5]
+    )
+end
+
+"""
+    precompile_nlls_problem()
+
+Mass-matrix DAE whose algebraic unknown is also given an initial value, so the
+initialization system is overdetermined and `ODEProblem` builds a
+`NonlinearLeastSquaresProblem` for it.
+"""
+function precompile_nlls_problem()
+    t = MTKBase.t_nounits
+    D = MTKBase.D_nounits
+    @parameters k = 1.0
+    @variables x(t) y(t)
+    sys = mtkcompile(System([D(x) ~ -k * x + y, 0 ~ y^3 + y - x], t; name = :precompile_nlls))
+    return ODEProblem(
+        sys, [x => 1.0, y => 0.6823278038280193], (0.0, 1.0);
+        warn_initialize_determined = false, fully_determined = false
+    )
+end
+
+"""
+    precompile_implicit_dae_problem()
+
+Implicit `DAEProblem` built the way MethodOfLines does it: a first-order system with
+algebraic boundary rows, `complete`d but not `mtkcompile`d, with
+`build_initializeprob = false` so the solver's own DAE initialization is used.
+"""
+function precompile_implicit_dae_problem()
+    t = MTKBase.t_nounits
+    D = MTKBase.D_nounits
+    n = 6
+    @parameters α = 1.0
+    @variables u(t)[1:n]
+    dx = 1 / (n - 1)
+    eqs = [
+        u[1] ~ 0;
+        [D(u[i]) ~ α * (u[i + 1] - 2u[i] + u[i - 1]) / dx^2 for i in 2:(n - 1)];
+        u[n] ~ 0
+    ]
+    sys = complete(System(eqs, t; name = :precompile_implicit_dae))
+    u0 = [sin(π * (i - 1) * dx) for i in 1:n]
+    du0 = [0.0; [(u0[i + 1] - 2u0[i] + u0[i - 1]) / dx^2 for i in 2:(n - 1)]; 0.0]
+    op = [[u[i] => u0[i] for i in 1:n]; [D(u[i]) => du0[i] for i in 1:n]]
+    return SciMLBase.DAEProblem(sys, op, (0.0, 0.1); build_initializeprob = false)
 end
 
 PrecompileTools.@compile_workload begin
@@ -72,4 +139,7 @@ PrecompileTools.@compile_workload begin
 
     precompile_ode_problem()
     precompile_dae_problem()
+    precompile_scc_dae_problem()
+    precompile_nlls_problem()
+    precompile_implicit_dae_problem()
 end
