@@ -2228,7 +2228,11 @@ function __process_SciMLProblem(
 
     # Implicit-DAE codegen expands an array equation into one output row per element, so
     # array equations are usable there. Every other problem type still needs `mtkcompile`.
-    implicit_dae || check_array_equations_unknowns(eqs, dvs)
+    allow_array_unknowns = flattens_array_unknowns(constructor)
+    implicit_dae || check_array_equations_unknowns(eqs, dvs; allow_array_unknowns)
+    if allow_array_unknowns && any(Symbolics.isarraysymbolic, dvs)
+        dvs = scalarized_vars(dvs)
+    end
 
     op = build_operating_point(sys, op; fast_path = true)
 
@@ -2371,6 +2375,18 @@ function __process_SciMLProblem(
     else
         return implicit_dae ? (f, du0, u0, p) : (f, u0, p)
     end
+end
+
+"""
+    $(TYPEDSIGNATURES)
+
+Whether problems built by `constructor` accept a system whose unknowns include array
+symbolics without `mtkcompile` scalarizing them first. For such problems `u` is the
+concatenation of the scalar and array unknowns in the order of `unknowns(sys)`, and the
+generated code reconstructs each array unknown as a view into `u`.
+"""
+Base.@nospecializeinfer function flattens_array_unknowns(@nospecialize(constructor))
+    return constructor <: OptimizationFunction
 end
 
 # Check that the keys of a u0map or pmap are valid

@@ -834,6 +834,16 @@ end
 """
     $(TYPEDSIGNATURES)
 
+The unknowns of `sys` in the layout of the `u` vector of an optimization problem. Array
+unknowns contribute one entry per element, so `u` stays flat even when `sys` has not been
+scalarized by `mtkcompile`; the generated code then reconstructs each array unknown as a
+view into `u`.
+"""
+optimization_unknowns(sys::System) = scalarized_vars(unknowns(sys))
+
+"""
+    $(TYPEDSIGNATURES)
+
 Generate the cost function for a [`System`](@ref).
 
 # Keyword Arguments
@@ -847,7 +857,7 @@ function generate_cost(sys::System, opts::GeneratedFunctionOptions)
     expression = expression_val(opts)
     wrap_gfw = wrap_gfw_val(opts)
     obj = cost(sys)
-    dvs = unknowns(sys)
+    dvs = optimization_unknowns(sys)
     ps = reorder_parameters(sys)
 
     if is_time_dependent(sys)
@@ -937,7 +947,7 @@ Calculate the gradient of the consolidated cost of `sys` with respect to the unk
 """
 function calculate_cost_gradient(sys::System; simplify = false)
     obj = cost(sys)
-    dvs = unknowns(sys)
+    dvs = optimization_unknowns(sys)
     return Symbolics.gradient(obj, dvs; simplify)
 end
 
@@ -960,7 +970,7 @@ function generate_cost_gradient(
     expression = expression_val(opts)
     wrap_gfw = wrap_gfw_val(opts)
     obj = cost(sys)
-    dvs = unknowns(sys)
+    dvs = optimization_unknowns(sys)
     ps = reorder_parameters(sys)
     exprs = calculate_cost_gradient(sys; simplify)
     res = build_function_wrapper(sys, exprs, [Any[dvs]; ps], BuildFunctionWrapperOptions(; u_arg = 1, codegen_function_options = opts.codegen))
@@ -978,7 +988,7 @@ matrix is returned.
 """
 function calculate_cost_hessian(sys::System; sparse = false, simplify = false)
     obj = cost(sys)
-    dvs = unknowns(sys)
+    dvs = optimization_unknowns(sys)
     if sparse
         return Symbolics.sparsehessian(obj, dvs; simplify)::AbstractSparseArray
     else
@@ -1017,7 +1027,7 @@ function generate_cost_hessian(
     expression = expression_val(opts)
     wrap_gfw = wrap_gfw_val(opts)
     obj = cost(sys)
-    dvs = unknowns(sys)
+    dvs = optimization_unknowns(sys)
     ps = reorder_parameters(sys)
     sparsity = nothing
     exprs = calculate_cost_hessian(sys; sparse, simplify)
@@ -1054,7 +1064,7 @@ function generate_cons(sys::System, opts::GeneratedFunctionOptions)
     expression = expression_val(opts)
     wrap_gfw = wrap_gfw_val(opts)
     cons = canonical_constraints(sys)
-    dvs = unknowns(sys)
+    dvs = optimization_unknowns(sys)
     ps = reorder_parameters(sys)
     res = build_function_wrapper(sys, cons, [Any[dvs]; ps], BuildFunctionWrapperOptions(; u_arg = 1, codegen_function_options = opts.codegen))
     return maybe_compile_function(
@@ -1077,7 +1087,7 @@ function calculate_constraint_jacobian(
         return_sparsity = false
     )
     cons = canonical_constraints(sys)
-    dvs = unknowns(sys)
+    dvs = optimization_unknowns(sys)
     sparsity = nothing
     if sparse
         jac = Symbolics.sparsejacobian(cons, dvs; simplify)::AbstractSparseArray
@@ -1109,7 +1119,7 @@ function generate_constraint_jacobian(
     (; eval_expression, eval_module) = opts
     expression = expression_val(opts)
     wrap_gfw = wrap_gfw_val(opts)
-    dvs = unknowns(sys)
+    dvs = optimization_unknowns(sys)
     ps = reorder_parameters(sys)
     jac,
         sparsity = calculate_constraint_jacobian(
@@ -1136,7 +1146,7 @@ function calculate_constraint_hessian(
         sys::System; simplify = false, sparse = false, return_sparsity = false
     )
     cons = canonical_constraints(sys)
-    dvs = unknowns(sys)
+    dvs = optimization_unknowns(sys)
     sparsity = nothing
     if sparse
         hess = map(cons) do cstr
@@ -1170,7 +1180,7 @@ function generate_constraint_hessian(
     (; eval_expression, eval_module) = opts
     expression = expression_val(opts)
     wrap_gfw = wrap_gfw_val(opts)
-    dvs = unknowns(sys)
+    dvs = optimization_unknowns(sys)
     ps = reorder_parameters(sys)
     hess,
         sparsity = calculate_constraint_hessian(
@@ -1692,7 +1702,7 @@ Base.@nospecializeinfer function build_explicit_observed_function(
     dvs = if param_only
         ()
     else
-        (unknowns(sys),)
+        (scalarized_vars(unknowns(sys)),)
     end
     if inputs isa Vector{SymbolicT}
         ps = setdiff(ps, inputs) # Inputs have been converted to parameters by io_preprocessing, remove those from the parameter list

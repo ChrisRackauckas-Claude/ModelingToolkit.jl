@@ -79,6 +79,22 @@ SciMLBase.ODEInputFunction
 ModelingToolkit.constraints_to_penalties
 ```
 
+Unlike the other problem types, `OptimizationProblem` and `OptimizationFunction` accept a
+system whose unknowns include array variables without requiring `mtkcompile` to scalarize
+them; `complete` is enough. The state vector `u` is the concatenation of the unknowns in
+the order of `unknowns(sys)`, with each array unknown contributing `length(x)` consecutive
+entries, and the generated objective, gradient, hessian and constraint functions
+reconstruct each array unknown as a view into `u`. Symbolic indexing is unchanged:
+`prob[x]` returns the whole array and `prob[x[i]]` a single element.
+
+```julia
+@variables x[1:3] y
+@parameters a[1:3]
+@named sys = System(Equation[], [x, y], [a]; costs = [sum(abs2, x .- a) + (y - 1)^2])
+prob = OptimizationProblem(complete(sys), [x => zeros(3), y => 0.0, a => [1.0, 2.0, 3.0]])
+length(prob.u0) == 4
+```
+
 ## The state vector and parameter object
 
 Typically the unknowns of the system are present as a `Vector` of the appropriate length
