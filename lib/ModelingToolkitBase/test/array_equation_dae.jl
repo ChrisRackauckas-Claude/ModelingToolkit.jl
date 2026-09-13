@@ -182,9 +182,10 @@ end
     @test accepts_array_equations(ODEFunction)
     @test !accepts_array_equations(SDEFunction)
     @test !accepts_array_equations(ImplicitDiscreteFunction)
-    # `OptimizationProblem` rejects `equations` outright (`check_no_equations`);
-    # constraints are a separate `generate_cons` codegen path.
+    # Optimization vectorizes `costs` and `constraints`, not `equations`:
+    # `check_no_equations` rejects them before this gate is reached.
     @test !accepts_array_equations(OptimizationFunction)
+    @test !accepts_array_equations(MultiObjectiveOptimizationFunction)
 end
 
 @testset "array residuals reject `jac`/`sparse` with a clear error" begin
