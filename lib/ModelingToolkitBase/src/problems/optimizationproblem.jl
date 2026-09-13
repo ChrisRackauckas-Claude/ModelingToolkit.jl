@@ -1,24 +1,32 @@
-"""$(function_docstring(OptimizationFunction, false, [:jac, :grad, :hess, :cons_h, :cons_j]))"""
+"""$(function_docstring(OptimizationFunction, false, [:jac, :grad, :hess, :cons_h, :cons_j, :adtype]; extra_kwargs = WEIGHTS_KWARGS))"""
 function SciMLBase.OptimizationFunction(sys::System, args...; kwargs...)
     return OptimizationFunction{true}(sys, args...; kwargs...)
+end
+
+function SciMLBase.OptimizationFunction{iip}(
+        sys::System, adtype::ADTypes.AbstractADType; kwargs...
+    ) where {iip}
+    return OptimizationFunction{iip}(sys; adtype, kwargs...)
 end
 
 function SciMLBase.OptimizationFunction{iip}(
         sys::System;
         u0 = nothing, p = nothing, t = nothing, grad = false, hess = false,
         sparse = false, cons_j = false, cons_h = false,
-        cons_sparse = false,
+        cons_sparse = false, adtype::ADTypes.AbstractADType = SciMLBase.NoAD(),
         linenumbers = true, eval_expression = false,
         eval_module = @__MODULE__,
         simplify = false, check_compatibility = true, checkbounds = false,
-        expression = Val{false}, optimize = nothing,
+        expression = Val{false}, optimize = nothing, weights = nothing,
         compiler_options::CompilerOptions = CompilerOptions(), kwargs...
     ) where {iip}
     opts = SciMLFunctionOptions(;
         u0, p, t, sparse, simplify, expression, check_compatibility,
         eval_expression, eval_module, compiler_options, checkbounds, optimize, kwargs...,
     )
-    return OptimizationFunction{iip}(sys, opts; grad, hess, cons_j, cons_h, cons_sparse)
+    return OptimizationFunction{iip}(
+        sys, opts; grad, hess, cons_j, cons_h, cons_sparse, weights, adtype
+    )
 end
 
 """
@@ -30,10 +38,15 @@ Public entry point that builds an `OptimizationFunction` directly from a pre-ass
 function SciMLBase.OptimizationFunction{iip}(
         sys::System, opts::SciMLFunctionOptions{E};
         grad::Bool = false, hess::Bool = false, cons_j::Bool = false, cons_h::Bool = false,
-        cons_sparse::Bool = false
+        cons_sparse::Bool = false, weights = nothing,
+        adtype::ADTypes.AbstractADType = SciMLBase.NoAD()
     ) where {iip, E}
     check_complete(sys, OptimizationFunction)
     opts.check_compatibility && check_compatible_system(OptimizationFunction, sys)
+
+    if weights !== nothing
+        sys = system_with_cost_weights(sys, weights)
+    end
 
     cstr = constraints(sys)
 
@@ -86,7 +99,7 @@ function SciMLBase.OptimizationFunction{iip}(
 
     observedfun = ObservedFunctionCache(sys, codegen_opts)
 
-    args = (; f, ad = SciMLBase.NoAD())
+    args = (; f, ad = adtype)
     kwargs = (;
         sys = sys,
         grad = _grad,
@@ -105,7 +118,7 @@ function SciMLBase.OptimizationFunction{iip}(
     return maybe_codegen_scimlfn(Val{E}, OptimizationFunction{iip}, args; kwargs...)
 end
 
-"""$(problem_docstring(SciMLBase.OptimizationProblem, OptimizationFunction, false; init = false))"""
+"""$(problem_docstring(SciMLBase.OptimizationProblem, OptimizationFunction, false; init = false, extra_kwargs = WEIGHTS_KWARGS * ADTYPE_PROBLEM_KWARGS))"""
 function SciMLBase.OptimizationProblem(sys::System, args...; kwargs...)
     return OptimizationProblem{true}(sys, args...; kwargs...)
 end
@@ -164,7 +177,8 @@ function SciMLBase.OptimizationProblem{iip}(
     end
 
     kwargs = process_kwargs(sys; kwargs...)
-    kwargs = (; lb, ub, int, lcons, ucons, kwargs...)
+    ptype = getmetadata(sys, ProblemTypeCtx, nothing)
+    kwargs = (; lb, ub, int, lcons, ucons, problem_type = ptype, kwargs...)
     args = (; f, u0, p)
     return maybe_codegen_scimlproblem(expression, OptimizationProblem{iip}, args; kwargs...)
 end
@@ -178,4 +192,176 @@ function check_compatible_system(
     check_no_jumps(sys, T)
     check_no_noise(sys, T)
     return check_no_equations(sys, T)
+end
+
+"""
+    $(TYPEDSIGNATURES)
+
+Return a `consolidate` function computing `sum(weights .* costs)` plus the sum of the
+consolidated `subcosts` of all subsystems. See [`system_with_cost_weights`](@ref).
+"""
+function weighted_consolidate(weights)
+    ws = unwrap.(weights)
+    return function (costs, subcosts)
+        return _sum_costs(SymbolicT[w * c for (w, c) in zip(ws, costs)]) +
+            _sum_costs(subcosts)
+    end
+end
+
+"""
+    $(TYPEDSIGNATURES)
+
+Return a copy of `sys` whose `consolidate` function computes the `weights`-weighted sum of
+the top-level costs of `sys` instead of deferring to the system's own `consolidate`. The
+costs of subsystems are still consolidated recursively by their own `consolidate` and
+added to the result.
+
+`weights` must have one entry per top-level cost of `sys` (that is,
+`length(weights) == length(get_costs(sys))`). Entries may be real numbers or symbolic
+parameters of `sys`. Symbolic weights must be declared as parameters of `sys` so that
+they are discoverable in the parameter object (`prob.p`) and can be updated via `remake`
+between solves.
+"""
+function system_with_cost_weights(sys::System, weights)
+    weights isa AbstractVector || throw(
+        ArgumentError(
+            "`weights` must be a vector with one entry per cost of `sys`."
+        )
+    )
+    cs = get_costs(sys)
+    length(weights) == length(cs) || throw(
+        ArgumentError(
+            "Expected `weights` to have one entry per cost of `sys`, but got \
+            $(length(weights)) weights for $(length(cs)) costs."
+        )
+    )
+    for w in weights
+        # `Num <: Number`, so `unwrap` before checking for numeric weights.
+        w = unwrap(w)
+        w isa Number && continue
+        symbolic_type(w) === NotSymbolic() && throw(
+            ArgumentError(
+                "Entries of `weights` must be real numbers or symbolic parameters of \
+                `sys`; got `$w`."
+            )
+        )
+        is_parameter(sys, w) || throw(
+            ArgumentError(
+                "Symbolic weight `$w` is not a parameter of `sys`. Declare it via \
+                `@parameters` in the system so that it can be provided and updated \
+                through the parameter object."
+            )
+        )
+    end
+    @set! sys.consolidate = weighted_consolidate(weights)
+    return sys
+end
+
+"""
+    constraints_to_penalties(sys::System; weights = 1.0)
+
+Return a new [`System`](@ref) in which every constraint of `sys` - including those of
+its subsystems - is removed from `constraints` and appended to `costs` as a weighted
+quadratic penalty term. This is the "classical PINN" formulation of a constrained
+problem: all constraint residuals are folded into the objective, producing an
+unconstrained system that can be solved by optimizers which do not accept explicit
+`cons`/`lcons`/`ucons` constraints.
+
+- `Equation` constraints `l ~ r` contribute `weights[i] * (l - r)^2`.
+- `Inequality` constraints contribute `weights[i] * max(residual, 0)^2`, where
+  `residual` is the constraint rewritten in canonical `residual ≲ 0` form via
+  `Symbolics.canonical_form`, so only violations of the constraint are penalized.
+
+`weights` may be a scalar applied to every constraint, or a vector with one entry per
+element of `constraints(sys)`, which orders a system's own constraints before its
+subsystems'. Symbolic weights (e.g. penalty parameters that should be tunable through
+the problem's parameter object) that are not already parameters or unknowns of the
+system are automatically added to its parameters.
+
+Penalty terms are appended to `costs(sys)` and are therefore combined with the rest of
+the objective through the system's `consolidate` function. Note that a finite `weights`
+makes the constraint satisfaction soft: increasing the magnitude of the weights enforces
+the constraints more tightly at the cost of a stiffer objective.
+
+# Example
+
+```julia
+using ModelingToolkitBase
+@variables x
+@named sys = OptimizationSystem((x - 2)^2, [x], []; constraints = [x ≲ 1])
+pen_sys = constraints_to_penalties(complete(sys); weights = 1.0e3)
+```
+"""
+function constraints_to_penalties(sys::System; weights = 1.0)
+    if weights isa Union{AbstractVector, Tuple} &&
+            length(weights) != length(constraints(sys))
+        throw(
+            ArgumentError(
+                """
+                Expected `weights` to be a scalar or have one entry per constraint of the \
+                system (including subsystem constraints). Got $(length(weights)) weights \
+                for $(length(constraints(sys))) constraints.
+                """
+            )
+        )
+    end
+    return _constraints_to_penalties(sys, weights)
+end
+
+function _constraints_to_penalties(sys::System, weights)
+    cstrs = get_constraints(sys)
+    own_weights = weights isa Union{AbstractVector, Tuple} ?
+        weights[1:length(cstrs)] : Iterators.repeated(weights, length(cstrs))
+    penalties = SymbolicT[]
+    new_ps = SymbolicT[]
+    for (cstr, w) in zip(cstrs, own_weights)
+        w = unwrap(w)
+        res = Symbolics.canonical_form(cstr).lhs
+        pen = cstr isa Equation ? w * res^2 : w * max(res, 0)^2
+        push!(penalties, value(pen))
+        _weight_parameters!(new_ps, sys, w)
+    end
+    @set! sys.costs = [get_costs(sys); penalties]
+    @set! sys.constraints = Union{Equation, Inequality}[]
+
+    subsystems = get_systems(sys)
+    if !isempty(subsystems)
+        newsystems = System[]
+        offset = length(cstrs)
+        for ssys in subsystems
+            subweights = weights
+            if weights isa Union{AbstractVector, Tuple}
+                nsub = length(constraints(ssys))
+                subweights = weights[(offset + 1):(offset + nsub)]
+                offset += nsub
+            end
+            push!(newsystems, _constraints_to_penalties(ssys, subweights))
+        end
+        @set! sys.systems = newsystems
+    end
+
+    if !isempty(new_ps)
+        @set! sys.ps = [get_ps(sys); new_ps]
+        if has_index_cache(sys) && get_index_cache(sys) !== nothing
+            # the `IndexCache` constructor reads `is_parameter` and family, so it must be
+            # cleared before rebuilding to avoid seeing the stale cache.
+            @set! sys.index_cache = nothing
+            @set! sys.index_cache = IndexCache(sys)
+        end
+    end
+    return sys
+end
+
+# Collect symbolic variables in a penalty weight that are not already parameters or
+# unknowns of `sys`, so they can be added to the system's parameters.
+function _weight_parameters!(new_ps::Vector{SymbolicT}, sys::System, w)
+    symbolic_type(w) === NotSymbolic() && return new_ps
+    for v in get_variables(w)
+        symbolic_type(v) === NotSymbolic() && continue
+        is_parameter(sys, v) && continue
+        any(Base.Fix2(isequal, v), get_unknowns(sys)) && continue
+        any(Base.Fix2(isequal, v), new_ps) && continue
+        push!(new_ps, v)
+    end
+    return new_ps
 end
