@@ -8,7 +8,7 @@ SciMLTesting = "09d9d899-5365-40a9-917a-5f67fddea283"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [sources]
-ModelingToolkitBase = {path = "../.."}
+ModelingToolkitBase = {path = "/home/crackauc/sandbox/agent-jobs/ModelingToolkit.jl/jobs/5151-claude/repo/lib/ModelingToolkitBase"}
 
 [compat]
 SciMLTesting = "2.4"
