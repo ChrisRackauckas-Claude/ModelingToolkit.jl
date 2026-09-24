@@ -189,7 +189,22 @@ Base.@nospecializeinfer function _ode_problem(
 
     ptype = getmetadata(sys, ProblemTypeCtx, StandardODEProblem())
     args = (; f, u0, tspan, p, ptype)
-    return maybe_codegen_scimlproblem(expression, ODEProblem{_iip}, args; kwargs...)
+    prob = maybe_codegen_scimlproblem(expression, ODEProblem{_iip}, args; kwargs...)
+    if spec === SciMLBase.AutoDespecialize && expression === Val{false}
+        f2, p2 = DiffEqBase.promote_f(
+            prob.f, Val(SciMLBase.AutoDespecialize), prob.u0, prob.p,
+            prob.tspan[1], Val(true), Val(1), nothing)
+        if f2 !== prob.f
+            f2 = SciMLBase.widen_bounded_type_params(f2)
+        end
+        u0_2 = DiffEqBase.promote_u0(prob.u0, prob.p, prob.tspan[1])
+        if f2 !== prob.f || p2 !== prob.p || u0_2 !== prob.u0
+            prob = ODEProblem{_iip}(
+                f2, u0_2, prob.tspan, p2, prob.problem_type; prob.kwargs...)
+            prob = DiffEqBase._erase_problem_callback_types(prob)
+        end
+    end
+    return prob
 end
 
 """$(problem_docstring(SciMLBase.ODEProblem, ODEFunction, true))"""
